@@ -56,20 +56,28 @@ All calls go through the content script (same origin, inherits session cookies):
 ## Setup
 
 ```bash
-cp .env.example .env    # Add API key, endpoint, SAP hostname
+cp .env.example .env    # Fill in all values (see Configuration below)
 node build.js           # No dependencies required
 # Load extension/ as unpacked in edge://extensions or chrome://extensions
 ```
 
+`build.js` validates all required variables and exits with a clear error if any are missing.
+
 ## Configuration
 
-`.env` requires 3 variables:
+All configuration lives in `.env` (see `.env.example`):
 
 | Variable | Description |
 |----------|-------------|
 | `AZURE_CLAUDE_API_KEY` | Azure AI Foundry API key |
 | `AZURE_CLAUDE_ENDPOINT` | Claude messages endpoint URL |
+| `AZURE_CLAUDE_MODEL` | Model name (e.g. `claude-sonnet-4-5`) |
+| `AZURE_CLAUDE_API_VERSION` | API version (e.g. `2023-06-01`) |
 | `SAP_HOSTNAME` | SAP Fiori hostname |
+| `SAP_CLIENT` | SAP client number (e.g. `100`) |
+| `SAP_ODATA_PATH` | OData service path (e.g. `/sap/opu/odata/sap/ZHR_TIME_ENTRY_SRV`) |
+
+User info (personnel number, name, cost center, role) is auto-discovered from SAP at runtime.
 
 ## Usage
 
