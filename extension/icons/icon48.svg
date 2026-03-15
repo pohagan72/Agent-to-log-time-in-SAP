@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="16" fill="#1a1a2e"/>
+  <rect x="8" y="8" width="112" height="112" rx="12" fill="#16213e" stroke="#e94560" stroke-width="2"/>
+  <text x="64" y="52" text-anchor="middle" fill="#e94560" font-family="Arial,sans-serif" font-size="28" font-weight="bold">SAP</text>
+  <text x="64" y="80" text-anchor="middle" fill="#53a8b6" font-family="Arial,sans-serif" font-size="16">Hours</text>
+  <circle cx="100" cy="28" r="10" fill="#4ecca3"/>
+  <text x="100" y="33" text-anchor="middle" fill="#1a1a2e" font-family="Arial,sans-serif" font-size="14" font-weight="bold">AI</text>
+</svg>

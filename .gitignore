@@ -1,0 +1,6 @@
+node_modules/
+.env
+.claude/
+extension/config.js
+extension/user-config.js
+extension/manifest.json
