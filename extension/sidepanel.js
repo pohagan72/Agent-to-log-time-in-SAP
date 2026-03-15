@@ -5,6 +5,7 @@ const statusEl = document.getElementById('status');
 const minimizeBtn = document.getElementById('minimizeBtn');
 
 let conversationHistory = [];
+let userConfig = null;
 
 // Detect if running inside an iframe (embedded in SAP page) vs standalone popup
 const isEmbedded = window.parent !== window;
@@ -42,6 +43,15 @@ window.addEventListener('message', (event) => {
     return;
   }
 
+  // Handle user config push from content script auto-discovery
+  if (event.data.type === 'USER_CONFIG_READY') {
+    if (!userConfig && event.data.config) {
+      userConfig = event.data.config;
+      console.log('[SAP Hours Agent] Received user config from content script:', userConfig.displayName);
+    }
+    return;
+  }
+
   const { id, result } = event.data;
   const pending = pendingMessages[id];
   if (pending) {
@@ -50,6 +60,60 @@ window.addEventListener('message', (event) => {
     pending.resolve(result);
   }
 });
+
+// --- Load User Config ---
+
+async function loadUserConfig() {
+  // 1. Check chrome.storage cache
+  const cached = await new Promise(resolve => {
+    chrome.storage.local.get('sapUserConfig', data => resolve(data.sapUserConfig));
+  });
+
+  if (cached && cached.persNumber) {
+    console.log('[SAP Hours Agent] Loaded user config from cache:', cached.displayName);
+    return cached;
+  }
+
+  // 2. Request from content script (embedded mode)
+  if (isEmbedded) {
+    try {
+      const config = await postMessageToParent('GET_USER_CONFIG', {});
+      if (config && config.persNumber) {
+        console.log('[SAP Hours Agent] Got user config from content script:', config.displayName);
+        return config;
+      }
+    } catch (e) {
+      console.log('[SAP Hours Agent] Could not get config from content script:', e.message);
+    }
+  } else {
+    // 3. Request via chrome.tabs message (popup mode)
+    try {
+      const tab = await findSAPTab();
+      if (tab) {
+        const config = await chrome.tabs.sendMessage(tab.id, { type: 'GET_USER_CONFIG' });
+        if (config && config.persNumber) {
+          console.log('[SAP Hours Agent] Got user config from SAP tab:', config.displayName);
+          return config;
+        }
+      }
+    } catch (e) {
+      console.log('[SAP Hours Agent] Could not get config from SAP tab:', e.message);
+    }
+  }
+
+  // 4. Return defaults if discovery hasn't completed yet
+  console.warn('[SAP Hours Agent] User config not yet available, using defaults');
+  return {
+    persNumber: '',
+    userName: '',
+    displayName: '',
+    userTitle: '',
+    company: '',
+    costCenter: '',
+    defaultRole: 'ZADMIN',
+    sapHostname: CONFIG.sapHostname,
+  };
+}
 
 // --- State Persistence ---
 
@@ -100,32 +164,103 @@ async function restoreState() {
 // --- Init ---
 
 async function init() {
-  setStatus('connected', 'Ready');
+  setStatus('connected', 'Discovering...');
 
   // Hide minimize button if not embedded
   if (!isEmbedded && minimizeBtn) {
     minimizeBtn.style.display = 'none';
   }
 
+  // Load user config (auto-discovered from SAP)
+  userConfig = await loadUserConfig();
+
+  if (!userConfig.persNumber) {
+    setStatus('error', 'Setup needed');
+    addMessage('system', 'Could not auto-detect your SAP user info. Make sure you are on the SAP Time Entry page and refresh.');
+  } else {
+    setStatus('connected', 'Ready');
+  }
+
   const restored = await restoreState();
   if (restored) {
     addMessage('system', 'Page refreshed — entries submitted. Conversation restored.');
   } else {
-    const firstName = USER_CONFIG.displayName.split(' ')[0] || 'there';
-    addMessage('agent', `Hi ${firstName}! I'm your SAP time entry assistant.\n\nTell me what you worked on last week and I'll fill in your timesheet. For example:\n\n"I spent all week on Agentics AI, 8 hours a day"\n\n"Last week was 4h Agentics AI and 4h AI Platform every day, and I took Friday off"`);
+    await showWelcome();
   }
+}
+
+async function showWelcome() {
+  const firstName = (userConfig.displayName || '').split(' ')[0] || 'there';
+
+  // Try to get context for a smarter greeting
+  let weekInfo = '';
+  let favExamples = '';
+  let favs = [];
+
+  try {
+    const weekTotal = await getWeekTotal();
+    if (weekTotal && !weekTotal.error) {
+      weekInfo = `\nYou have **${weekTotal.hours}h** logged this week so far.`;
+    }
+  } catch (e) { /* ignore */ }
+
+  try {
+    favs = await getFavorites();
+    if (favs.length >= 2) {
+      const f1 = favs[0].projectDesc || favs[0].project;
+      const f2 = favs[1].projectDesc || favs[1].project;
+      favExamples = `\n\n"I spent all week on ${f1}, 8 hours a day"\n\n"Last week was 4h ${f1} and 4h ${f2} every day, and I took Friday off"`;
+    } else if (favs.length === 1) {
+      const f1 = favs[0].projectDesc || favs[0].project;
+      favExamples = `\n\n"I spent all week on ${f1}, 8 hours a day"\n\n"Last week was 8h ${f1} every day, I took Friday off"`;
+    }
+  } catch (e) { /* ignore */ }
+
+  if (!favExamples) {
+    favExamples = '\n\n"I spent all week on project X, 8 hours a day"\n\n"Last week was 4h project A and 4h project B every day, and I took Friday off"';
+  }
+
+  addMessage('agent', `Hi ${firstName}! I'm your SAP time entry assistant.${weekInfo}\n\nTell me what you worked on and I'll fill in your timesheet. For example:${favExamples}`);
+
+  // Update quick action buttons with user's favorites
+  const quickActions = document.getElementById('quickActions');
+  if (quickActions && favs && favs.length > 0) {
+    const f1 = favs[0].projectDesc || favs[0].project;
+    const buttons = [
+      { label: `8h ${shortName(f1)} (last week)`, msg: `Enter 8 hours on ${f1} for all of last week` },
+      { label: 'Missing days', msg: 'Which days am I missing hours this month?' },
+    ];
+    if (favs.length >= 2) {
+      const f2 = favs[1].projectDesc || favs[1].project;
+      buttons.push({ label: `Split ${shortName(f1)}/${shortName(f2)}`, msg: `Split last week: 4h ${f1} and 4h ${f2} each day` });
+    } else {
+      buttons.push({ label: 'Copy last week', msg: 'Copy last week to this week' });
+    }
+    quickActions.innerHTML = '';
+    for (const b of buttons) {
+      const btn = document.createElement('button');
+      btn.textContent = b.label;
+      btn.dataset.msg = b.msg;
+      btn.addEventListener('click', () => { userInput.value = b.msg; handleSend(); });
+      quickActions.appendChild(btn);
+    }
+  }
+}
+
+function shortName(name) {
+  // Trim project names for button labels: "Agentics AI - 2026" -> "Agentics AI"
+  return name.replace(/\s*-\s*\d{4}$/, '').replace(/^LS-Dev \d+-/, '').trim();
 }
 
 // --- Chat UI ---
 
 function formatAgentText(text) {
-  // Escape HTML first
   let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   // Bold: **text**
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 
-  // Markdown tables: detect lines starting with |
+  // Markdown tables
   const lines = html.split('\n');
   let inTable = false;
   const out = [];
@@ -144,7 +279,6 @@ function formatAgentText(text) {
     } else {
       if (inTable) { out.push('</table>'); inTable = false; }
       if (line === '') {
-        // Collapse multiple blank lines — only add break if previous wasn't empty
         if (out.length > 0 && !out[out.length - 1].endsWith('<br>') && out[out.length - 1] !== '') {
           out.push('<br>');
         }
@@ -155,7 +289,6 @@ function formatAgentText(text) {
   }
   if (inTable) out.push('</table>');
 
-  // Clean up trailing <br>
   let result = out.join('');
   result = result.replace(/(<br>)+$/, '');
   return result;
@@ -309,13 +442,40 @@ async function getSAPProjectActivities(projectId, role) {
   return chrome.tabs.sendMessage(tab.id, { type: 'GET_PROJECT_ACTIVITIES', projectId, role });
 }
 
+async function getFavorites() {
+  if (isEmbedded) {
+    return postMessageToParent('GET_FAVORITES', {});
+  }
+  const tab = await findSAPTab();
+  if (!tab) return [];
+  return chrome.tabs.sendMessage(tab.id, { type: 'GET_FAVORITES' });
+}
+
+async function getCalendarStatus(referenceDate) {
+  if (isEmbedded) {
+    return postMessageToParent('GET_CALENDAR_STATUS', { referenceDate });
+  }
+  const tab = await findSAPTab();
+  if (!tab) return { days: [], error: 'No SAP tab found' };
+  return chrome.tabs.sendMessage(tab.id, { type: 'GET_CALENDAR_STATUS', referenceDate });
+}
+
+async function getWeekTotal() {
+  if (isEmbedded) {
+    return postMessageToParent('GET_WEEK_TOTAL', {});
+  }
+  const tab = await findSAPTab();
+  if (!tab) return { hours: 0, error: 'No SAP tab found' };
+  return chrome.tabs.sendMessage(tab.id, { type: 'GET_WEEK_TOTAL' });
+}
+
 // Fallback for popup mode
 async function findSAPTab() {
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (activeTab && activeTab.url && activeTab.url.includes(USER_CONFIG.sapHostname)) {
+  if (activeTab && activeTab.url && activeTab.url.includes(CONFIG.sapHostname)) {
     return activeTab;
   }
-  const sapTabs = await chrome.tabs.query({ url: `https://${USER_CONFIG.sapHostname}/*` });
+  const sapTabs = await chrome.tabs.query({ url: `https://${CONFIG.sapHostname}/*` });
   return sapTabs.length > 0 ? sapTabs[0] : null;
 }
 
@@ -330,6 +490,11 @@ async function callClaude(userMessage, sapState) {
     sapState = await getSAPState();
   }
 
+  // Refresh user config if we don't have it yet
+  if (!userConfig || !userConfig.persNumber) {
+    userConfig = await loadUserConfig();
+  }
+
   const today = new Date().toISOString().split('T')[0];
   const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
 
@@ -337,9 +502,11 @@ async function callClaude(userMessage, sapState) {
 
   let projectSection = '';
   if (favProjects.length > 0) {
-    projectSection += 'FAVORITE PROJECTS (read from SAP page):\n';
+    projectSection += 'FAVORITE PROJECTS (from SAP):\n';
     favProjects.forEach((p, i) => {
-      if (typeof p === 'object') {
+      if (p.projectDesc) {
+        projectSection += `${i + 1}. ${p.project} — ${p.projectDesc} (Activity: ${p.activity} / ${p.activityDesc || ''})\n`;
+      } else if (typeof p === 'object') {
         projectSection += `${i + 1}. ${p.project} (Activity: ${p.activity})\n`;
       } else {
         projectSection += `${i + 1}. ${p}\n`;
@@ -347,13 +514,21 @@ async function callClaude(userMessage, sapState) {
     });
   }
 
-  const systemPrompt = `You are an AI assistant embedded in a browser extension on the SAP Fiori Time Entry page. You help ${USER_CONFIG.displayName} enter their weekly hours.
+  const displayName = userConfig.displayName || 'User';
+  const company = userConfig.company || 'Unknown';
+  const persNumber = userConfig.persNumber || 'Unknown';
+  const costCenterDisplay = userConfig.costCenterName
+    ? `${userConfig.costCenter} / ${userConfig.costCenterName}`
+    : userConfig.costCenter || 'Unknown';
+  const defaultRole = userConfig.defaultRole || 'ZADMIN';
+
+  const systemPrompt = `You are an AI assistant embedded in a browser extension on the SAP Fiori Time Entry page. You help ${displayName} enter their weekly hours.
 
 CONTEXT:
 - Today is ${today} (${dayOfWeek})
-- ${USER_CONFIG.displayName} works at ${USER_CONFIG.company}, Personnel #${USER_CONFIG.persNumber}
-- Cost Center: ${USER_CONFIG.costCenter}
-- Default Role: ${USER_CONFIG.defaultRole}
+- ${displayName} works at ${company}, Personnel #${persNumber}
+- Cost Center: ${costCenterDisplay}
+- Default Role: ${defaultRole}
 - Standard work day: 8 hours, Mon-Fri
 - Last week = Mon-Fri of the week before today's week
 
@@ -383,10 +558,55 @@ You can look up what hours have already been recorded for any date range:
 {"action": "GET_RECORDED_HOURS", "startDate": "2026-02-10", "endDate": "2026-02-14"}
 \`\`\`
 
-This returns all time entries with project, activity, hours, status (Approved/Pending), and description. Use this when:
+This returns all time entries with project, activity, hours, counter (ID), status (Approved/Pending), and description. Use this when:
 - The user asks what they recorded on a specific date or week
 - The user wants to check if hours are already entered before adding more
 - The user asks about their time entry history or status
+
+CHECK CALENDAR STATUS:
+Get a quick overview of which days in a month have hours entered:
+
+\`\`\`json
+{"action": "GET_CALENDAR_STATUS", "referenceDate": "2026-03-15"}
+\`\`\`
+
+Returns each day that has hours, whether it's complete (8h), and gaps. Use this to quickly identify missing days without fetching full entry details.
+
+GET WEEK TOTAL:
+Get the current week's total hours in a single call:
+
+\`\`\`json
+{"action": "GET_WEEK_TOTAL"}
+\`\`\`
+
+DELETE AN ENTRY:
+Delete a specific time entry by its counter ID (from GET_RECORDED_HOURS results):
+
+\`\`\`json
+{"action": "DELETE_ENTRY", "counter": "000055693654"}
+\`\`\`
+
+Always confirm with the user before deleting. Show them what will be deleted first.
+
+COPY WEEK:
+Copy all entries from one week's Monday to another week's Monday:
+
+\`\`\`json
+{"action": "COPY_WEEK", "fromDate": "2026-03-02", "toDate": "2026-03-09", "move": false}
+\`\`\`
+
+Set move=true to move entries instead of copy. Confirm with user first.
+
+MANAGE FAVORITES:
+Add or remove projects from the user's SAP favorites:
+
+\`\`\`json
+{"action": "ADD_FAVORITE", "projectId": "DEV.000982", "activity": "0010", "description": ""}
+\`\`\`
+
+\`\`\`json
+{"action": "REMOVE_FAVORITE", "projectId": "DEV.000982", "activity": "0010"}
+\`\`\`
 
 CURRENT SAP PAGE STATE:
 Day tabs: ${JSON.stringify(sapState.dayTabs || [])}
@@ -414,10 +634,11 @@ IMPORTANT: Every entry MUST include a "description" field (SAP rejects entries w
 \`\`\`
 
 RULES:
-- Always confirm the plan with the user BEFORE including the ENTER_TIME action
+- Always confirm the plan with the user BEFORE including the ENTER_TIME, DELETE_ENTRY, or COPY_WEEK actions
 - When proposing entries, ALWAYS show a clear table/list that includes the date, project, hours, AND the description you plan to use for each entry. The description is a required field in SAP and will be visible to managers, so the user must verify it.
-- If the user says "yes", "do it", "go ahead", "submit", "looks good", etc., THEN include the ENTER_TIME JSON
+- If the user says "yes", "do it", "go ahead", "submit", "looks good", etc., THEN include the action JSON
 - Use SEARCH_PROJECTS proactively when the user mentions non-obvious work (conferences, training, client work, etc.)
+- Use GET_CALENDAR_STATUS to quickly check which days need hours before proposing entries
 - Days should total 8 hours unless the user says otherwise
 - If the user says they took a day off, skip that day entirely (PTO is handled separately in SAP)
 - Generate professional, accurate descriptions based on what the user told you (e.g. "Agentics AI development and coding", "AI Platform requirements and design")
@@ -563,7 +784,7 @@ async function processAgentResponse(response) {
         }
 
         const hoursMsg = entries.length > 0
-          ? `Recorded hours from ${action.startDate} to ${action.endDate} (${result.totalHours}h total):\n${entries.map(e => `- ${e.date}: ${e.hours}h on ${e.project} / ${e.projectName}, activity: ${e.activityName || e.activity}, status: ${e.status}${e.description ? ', desc: ' + e.description : ''}`).join('\n')}`
+          ? `Recorded hours from ${action.startDate} to ${action.endDate} (${result.totalHours}h total):\n${entries.map(e => `- ${e.date}: ${e.hours}h on ${e.project} / ${e.projectName}, activity: ${e.activityName || e.activity}, counter: ${e.counter}, status: ${e.status}${e.description ? ', desc: ' + e.description : ''}`).join('\n')}`
           : `No hours recorded from ${action.startDate} to ${action.endDate}.`;
 
         conversationHistory.push({ role: 'user', content: `[SYSTEM: ${hoursMsg}]` });
@@ -576,6 +797,114 @@ async function processAgentResponse(response) {
           addMessage('error', followUp.error);
         } else {
           await processAgentResponse(followUp);
+        }
+
+      } else if (action.action === 'GET_CALENDAR_STATUS') {
+        addMessage('system', `Checking calendar for ${action.referenceDate}...`);
+        const result = await getCalendarStatus(action.referenceDate);
+        const days = result.days || [];
+
+        if (result.error) {
+          addMessage('error', `Calendar error: ${result.error}`);
+        }
+
+        const calMsg = days.length > 0
+          ? `Calendar status for month of ${action.referenceDate}:\n${days.map(d => `- ${d.date}: ${d.hours}h ${d.complete ? '(complete)' : '(INCOMPLETE)'}`).join('\n')}\nDays not listed have NO hours entered.`
+          : `No hours recorded in the month of ${action.referenceDate}.`;
+
+        addMessage('system', calMsg);
+        conversationHistory.push({ role: 'user', content: `[SYSTEM: ${calMsg}]` });
+
+        setStatus('connected', 'Thinking...');
+        showTyping();
+        const followUp = await callClaude('', null);
+        hideTyping();
+        if (followUp.error) {
+          addMessage('error', followUp.error);
+        } else {
+          await processAgentResponse(followUp);
+        }
+
+      } else if (action.action === 'GET_WEEK_TOTAL') {
+        const result = await getWeekTotal();
+        const msg = result.error
+          ? `Could not get week total: ${result.error}`
+          : `Current week: ${result.hours}h (${result.label})`;
+        addMessage('system', msg);
+        conversationHistory.push({ role: 'user', content: `[SYSTEM: ${msg}]` });
+
+        setStatus('connected', 'Thinking...');
+        showTyping();
+        const followUp = await callClaude('', null);
+        hideTyping();
+        if (followUp.error) {
+          addMessage('error', followUp.error);
+        } else {
+          await processAgentResponse(followUp);
+        }
+
+      } else if (action.action === 'DELETE_ENTRY') {
+        addMessage('system', `Deleting entry ${action.counter}...`);
+        const result = await sendSAPAction({ type: 'DELETE_ENTRY', counter: action.counter });
+        if (result.success) {
+          addMessage('system', result.message);
+          conversationHistory.push({ role: 'user', content: `[SYSTEM: Entry ${action.counter} deleted successfully.]` });
+        } else {
+          addMessage('error', `Delete failed: ${result.error}`);
+          conversationHistory.push({ role: 'user', content: `[SYSTEM: Delete failed: ${result.error}]` });
+        }
+
+        setStatus('connected', 'Thinking...');
+        showTyping();
+        const followUp = await callClaude('', null);
+        hideTyping();
+        if (followUp.error) {
+          addMessage('error', followUp.error);
+        } else {
+          await processAgentResponse(followUp);
+        }
+
+      } else if (action.action === 'COPY_WEEK') {
+        const verb = action.move ? 'Moving' : 'Copying';
+        addMessage('system', `${verb} entries from ${action.fromDate} to ${action.toDate}...`);
+        const result = await sendSAPAction({
+          type: 'COPY_WEEK',
+          fromDate: action.fromDate,
+          toDate: action.toDate,
+          move: action.move || false,
+        });
+        if (result.success) {
+          addMessage('system', result.message || `${verb} complete!`);
+          conversationHistory.push({ role: 'user', content: `[SYSTEM: ${verb} from ${action.fromDate} to ${action.toDate} succeeded.]` });
+        } else {
+          addMessage('error', `${verb} failed: ${result.error}`);
+          conversationHistory.push({ role: 'user', content: `[SYSTEM: ${verb} failed: ${result.error}]` });
+        }
+
+        setStatus('connected', 'Thinking...');
+        showTyping();
+        const followUp = await callClaude('', null);
+        hideTyping();
+        if (followUp.error) {
+          addMessage('error', followUp.error);
+        } else {
+          await processAgentResponse(followUp);
+        }
+
+      } else if (action.action === 'ADD_FAVORITE' || action.action === 'REMOVE_FAVORITE') {
+        const isAdd = action.action === 'ADD_FAVORITE';
+        const verb = isAdd ? 'Adding' : 'Removing';
+        addMessage('system', `${verb} favorite ${action.projectId}/${action.activity}...`);
+        const result = await sendSAPAction({
+          type: isAdd ? 'ADD_FAVORITE' : 'REMOVE_FAVORITE',
+          projectId: action.projectId,
+          activity: action.activity,
+          description: action.description || '',
+        });
+        if (result.success) {
+          addMessage('system', result.message || `Favorite ${isAdd ? 'added' : 'removed'}!`);
+        } else {
+          addMessage('error', `Failed: ${result.error}`);
         }
       }
     } catch (e) {

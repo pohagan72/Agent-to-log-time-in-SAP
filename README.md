@@ -1,117 +1,116 @@
 # SAP Hours Agent
 
-A Chrome/Edge browser extension that uses Claude AI to automate SAP Fiori time entry via natural language. Embeds a persistent chat panel directly into the SAP Time Entry page and interacts with SAP's OData API to read, search, and create time entries.
+Chrome/Edge extension that uses Claude AI to automate SAP Fiori time entry via natural language. Injects a chat panel into any SAP Fiori page, communicates with SAP's OData API, and auto-discovers user info at runtime.
 
 ## Architecture
 
 ```
-User ←→ Chat Panel (iframe) ←→ Content Script ←→ SAP OData API
-                ↕
+User <-> Chat Panel (iframe) <-> Content Script <-> SAP OData API
+                |
          Claude API (Azure)
 ```
 
-- **Content script** (`content.js`) — Injected into SAP pages at `document_idle`. Injects a persistent side panel as an iframe, handles all SAP OData V2 API calls (`ZHR_TIME_ENTRY_SRV`) using the page's session cookies, and bridges communication between the iframe and SAP via `postMessage`.
-- **Side panel** (`sidepanel.html` / `sidepanel.js`) — Runs inside the injected iframe in extension context. Manages the chat UI, calls the Claude API directly, and implements the agentic loop (Claude emits JSON actions → extension executes them → feeds results back to Claude).
-- **Background worker** (`background.js`) — Handles extension icon click to toggle panel visibility.
-- **Build step** (`build.js`) — Reads `.env` and generates `config.js`, `user-config.js`, and `manifest.json` with user-specific values. All generated files are gitignored.
+- `content.js` — Injected at `document_idle`. Auto-discovers user identity from SAP, injects the chat panel iframe, handles all OData calls (`ZHR_TIME_ENTRY_SRV`) using session cookies, bridges iframe <-> SAP via `postMessage`.
+- `sidepanel.html/js` — Chat UI in extension context. Calls Claude API directly. Implements the agentic loop: Claude emits JSON actions, extension executes them, results feed back into conversation.
+- `background.js` — Toggles panel on extension icon click.
+- `build.js` — Reads `.env`, generates `config.js` and `manifest.json` (both gitignored).
 
-### Agentic Loop
+### Agent Actions
 
-Claude's responses can contain JSON action blocks that the extension executes automatically:
+Claude can emit these JSON action blocks, which the extension executes and feeds back:
 
 | Action | Description |
 |--------|-------------|
-| `SEARCH_PROJECTS` | Searches SAP's `ProjectSearchSet` by ID or description |
-| `GET_ACTIVITIES` | Fetches available activities for a project from `ProjectActivitySet` |
-| `GET_RECORDED_HOURS` | Reads past time entries from `TimeEntrySet` with date range filter |
-| `ENTER_TIME` | Creates entries via `$batch` POST to `TimeEntrySet` (requires CSRF token) |
+| `SEARCH_PROJECTS` | Search `ProjectSearchSet` by ID or description |
+| `GET_ACTIVITIES` | Fetch activities for a project from `ProjectActivitySet` |
+| `GET_RECORDED_HOURS` | Read time entries from `TimeEntrySet` with date range filter |
+| `GET_CALENDAR_STATUS` | Check which days have hours via `CalendarMarkingSet` |
+| `GET_WEEK_TOTAL` | Current week total from `DynTileInfoSet` |
+| `ENTER_TIME` | Create entries via `$batch` POST to `TimeEntrySet` |
+| `DELETE_ENTRY` | Delete entry by counter ID |
+| `COPY_WEEK` | Copy or move entries between weeks via `TimeEntryCopyToSet` |
+| `ADD_FAVORITE` | Add project/activity to SAP favorites |
+| `REMOVE_FAVORITE` | Remove project/activity from SAP favorites |
 
-Results are fed back into the conversation as system messages, allowing Claude to chain multiple actions before responding to the user.
+### Auto-Discovery
+
+No manual user configuration required. On first load:
+
+1. Reads SAP username from the FLP `<meta name="sap.ushellConfig.serverSideConfig">` tag
+2. Queries `HRInfoSet` for personnel number, cost center, company, job title, role, work hours
+3. Fetches favorites via `HRInfoSet?$expand=NavFavSet`
+4. Caches in `chrome.storage.local` (7-day TTL)
+
+Works from any SAP Fiori page, not just Time Entry.
 
 ### OData Details
 
-All API calls go through the content script (same origin as SAP, inherits session cookies):
+All calls go through the content script (same origin, inherits session cookies):
 
-- **Reads**: Standard OData GET with `$filter`, `$expand`, `$format=json`
-- **Writes**: Multipart `$batch` POST with changeset boundary, requires CSRF token fetched via `x-csrf-token: Fetch` header
-- **Defaults**: Before creating an entry, fetches `TimeEntryDetailSet` to get required field defaults (Network, CompanyCode, billing flags, etc.)
-- **Activity resolution**: Claude may send activity names ("Coding") — the extension resolves these to SAP activity codes ("0010") via `ProjectActivitySet` lookup
+- **Reads**: OData GET with `$filter`, `$expand`, `$format=json`
+- **Writes**: `$batch` POST with changeset boundary, CSRF token via `HEAD` with `x-csrf-token: Fetch`
+- **Deletes**: OData `DELETE` by entity key
+- **Defaults**: Fetches `TimeEntryDetailSet` before creating entries to get required field defaults (Network, CompanyCode, billing flags, etc.)
+- **Activity resolution**: Resolves activity names ("Coding") to SAP codes ("0010") via `ProjectActivitySet`
 
 ## Setup
 
 ```bash
-# 1. Clone and configure
-cp .env.example .env
-# Edit .env with your API keys and SAP details
-
-# 2. Build (no dependencies required)
-node build.js
-
-# 3. Load extension
-# Edge:  edge://extensions → Developer mode → Load unpacked → select extension/
-# Chrome: chrome://extensions → Developer mode → Load unpacked → select extension/
+cp .env.example .env    # Add API key, endpoint, SAP hostname
+node build.js           # No dependencies required
+# Load extension/ as unpacked in edge://extensions or chrome://extensions
 ```
-
-The build generates three gitignored files in `extension/`:
-- `config.js` — API endpoint and key
-- `user-config.js` — SAP hostname, personnel number, user details
-- `manifest.json` — Dynamic host permissions and content script matching
 
 ## Configuration
 
-All configuration lives in `.env` (see `.env.example`):
+`.env` requires 3 variables:
 
 | Variable | Description |
 |----------|-------------|
 | `AZURE_CLAUDE_API_KEY` | Azure AI Foundry API key |
 | `AZURE_CLAUDE_ENDPOINT` | Claude messages endpoint URL |
-| `AZURE_CLAUDE_MODEL` | Model name (e.g., `claude-sonnet-4-5`) |
-| `SAP_HOSTNAME` | Your SAP Fiori hostname |
-| `SAP_CLIENT` | SAP client number |
-| `SAP_PERS_NUMBER` | Your SAP personnel number |
-| `SAP_USER_NAME` | Your SAP username |
-| `SAP_USER_DISPLAY_NAME` | Your name (used in Claude's system prompt) |
-| `SAP_COST_CENTER` | Your cost center (used in Claude's system prompt) |
+| `SAP_HOSTNAME` | SAP Fiori hostname |
 
 ## Usage
 
-Navigate to your SAP Time Entry page. The agent panel appears automatically on the right side. Examples:
+The panel appears on any SAP page. Quick action buttons and example prompts adapt to the user's actual favorite projects.
 
-- *"I spent all week on Agentics AI, 8 hours a day"*
-- *"Last week was 4h Agentics AI and 4h AI Platform every day, I took Friday off"*
-- *"What hours did I record in February?"*
-- *"Search for conference projects"*
+```
+"8 hours on Agentics AI all of last week"
+"4h AI Platform and 4h Translate every day, Friday off"
+"Which days am I missing this month?"
+"Delete the 4h entry on Wednesday"
+"Copy last week to this week"
+```
 
-The agent will propose entries with dates, projects, hours, and descriptions for your review before submitting anything to SAP.
+All destructive actions (create, delete, copy) require user confirmation before execution.
 
 ## Project Structure
 
 ```
 sap-hours/
-  .env.example          # Template — copy to .env
-  .gitignore
-  build.js              # Generates config from .env
+  .env.example        # Template
+  build.js            # Generates config from .env
   extension/
-    background.js       # Extension icon click handler
-    content.js          # SAP OData API + panel injection + postMessage bridge
-    sidepanel.html      # Chat UI (loaded as iframe)
-    sidepanel.js        # Claude API + agentic loop + state persistence
-    icons/              # Extension icons
-    config.js           # Generated (gitignored)
-    user-config.js      # Generated (gitignored)
-    manifest.json       # Generated (gitignored)
+    background.js     # Icon click handler
+    content.js        # OData API + auto-discovery + panel injection
+    sidepanel.html    # Chat UI
+    sidepanel.js      # Claude API + agentic loop + state persistence
+    icons/
+    config.js         # Generated (gitignored)
+    manifest.json     # Generated (gitignored)
 ```
 
-## Security Notes
+## Security
 
-- API keys and personal info live exclusively in `.env` (gitignored)
-- `config.js`, `user-config.js`, and `manifest.json` are generated and gitignored
-- The content script runs in the SAP page context with same-origin access — no credentials are sent to any third party except the configured Claude API endpoint
-- The Claude API call is made from the extension iframe context, which has explicit `host_permissions` for the configured Azure endpoint
+- API keys in `.env` only (gitignored)
+- User info discovered at runtime, not stored in config files
+- Content script runs same-origin with SAP — no credentials sent to third parties except the configured Claude endpoint
+- Claude API called from extension context with explicit `host_permissions`
 
 ## Requirements
 
-- Node.js (build step only, no packages needed)
-- Microsoft Edge or Google Chrome
-- Access to a SAP Fiori Time Entry instance (`ZHR_TIME_ENTRY_SRV` OData service)
-- Azure AI Foundry endpoint with Claude model deployed
+- Node.js (build only, no packages)
+- Edge or Chrome
+- SAP Fiori instance with `ZHR_TIME_ENTRY_SRV` OData service
+- Azure AI Foundry endpoint with Claude model

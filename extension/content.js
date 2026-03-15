@@ -1,12 +1,158 @@
 // SAP Fiori Time Entry - Content Script
-// USER_CONFIG is loaded before this script via manifest.json content_scripts order
+// CONFIG is loaded before this script via manifest.json content_scripts order
 
 console.log('[SAP Hours Agent] Content script loaded');
 
-const SAP_ODATA_BASE = USER_CONFIG.sapODataPath;
-const SAP_CLIENT = `sap-client=${USER_CONFIG.sapClient}`;
-const PERS_NUMBER = USER_CONFIG.persNumber;
-const USER_NAME = USER_CONFIG.userName;
+const SAP_ODATA_BASE = CONFIG.sapODataPath;
+const SAP_CLIENT = `sap-client=${CONFIG.sapClient}`;
+
+// User info - populated by auto-discovery
+let PERS_NUMBER = '';
+let USER_NAME = '';
+let userConfig = null;
+
+// --- Auto-Discovery: detect user info from SAP APIs ---
+
+async function discoverUserInfo() {
+  // Check cache first
+  const cached = await new Promise(resolve => {
+    chrome.storage.local.get('sapUserConfig', data => resolve(data.sapUserConfig));
+  });
+
+  if (cached && cached.persNumber && Date.now() - cached.discoveredAt < 7 * 24 * 60 * 60 * 1000) {
+    console.log('[SAP Hours Agent] Using cached user config:', cached.displayName);
+    return cached;
+  }
+
+  console.log('[SAP Hours Agent] Auto-discovering user info from SAP...');
+
+  const config = {
+    persNumber: '',
+    userName: '',
+    displayName: '',
+    userTitle: '',
+    company: '',
+    costCenter: '',
+    costCenterName: '',
+    defaultRole: 'ZADMIN',
+    location: '',
+    workHours: '08',
+    sapHostname: CONFIG.sapHostname,
+    discoveredAt: Date.now(),
+  };
+
+  // 1. Read username from the FLP server-rendered meta tag
+  //    SAP embeds startupConfig (with user id, email, name) into a <meta> tag
+  try {
+    const metaEls = document.querySelectorAll('meta[name^="sap.ushellConfig.serverSideConfig"]');
+    for (const meta of metaEls) {
+      const content = meta.getAttribute('content');
+      if (content && content.includes('startupConfig')) {
+        const parsed = JSON.parse(content);
+        const startup = parsed.startupConfig || parsed;
+        config.userName = startup.id || '';
+        config.displayName = startup.fullName || '';
+        console.log(`[SAP Hours Agent] FLP meta tag: user=${config.userName}, name=${config.displayName}`);
+        break;
+      }
+    }
+  } catch (e) {
+    console.log('[SAP Hours Agent] FLP meta tag parse failed:', e.message);
+  }
+
+  // 2. Query HRInfoSet for full profile (personnel number, cost center, etc.)
+  //    Field names verified from HAR: PersNumber, FulllName (3 L's), CompName,
+  //    CostCenter, CostCenterName, ActivityType, JobTitle, Location, WorkHours
+  if (config.userName) {
+    try {
+      const filter = `UserName eq '${config.userName}'`;
+      const results = await sapODataGet('HRInfoSet', filter);
+      if (results.length > 0) {
+        const hr = results[0];
+        config.persNumber = hr.PersNumber || '';
+        config.displayName = config.displayName || hr.FulllName || '';
+        config.company = hr.CompName || '';
+        config.costCenter = hr.CostCenter || '';
+        config.costCenterName = hr.CostCenterName || '';
+        config.defaultRole = hr.ActivityType || 'ZADMIN';
+        config.userTitle = hr.JobTitle || '';
+        config.location = hr.Location || '';
+        config.workHours = hr.WorkHours || '08';
+        console.log(`[SAP Hours Agent] HRInfoSet: pers=${config.persNumber}, costCenter=${config.costCenterName}`);
+      }
+    } catch (e) {
+      console.log('[SAP Hours Agent] HRInfoSet failed:', e.message);
+    }
+  }
+
+  // 3. Fallback if no username from meta tag: try HRInfoSet by key (empty = current user)
+  if (!config.userName) {
+    try {
+      // Some SAP systems allow querying HRInfoSet without a filter for the current user
+      const results = await sapODataGet('HRInfoSet', '');
+      if (results.length > 0) {
+        const hr = results[0];
+        config.userName = hr.UserName || '';
+        config.persNumber = hr.PersNumber || '';
+        config.displayName = hr.FulllName || '';
+        config.company = hr.CompName || '';
+        config.costCenter = hr.CostCenter || '';
+        config.costCenterName = hr.CostCenterName || '';
+        config.defaultRole = hr.ActivityType || 'ZADMIN';
+        config.userTitle = hr.JobTitle || '';
+        config.location = hr.Location || '';
+        config.workHours = hr.WorkHours || '08';
+        console.log(`[SAP Hours Agent] HRInfoSet (no filter): pers=${config.persNumber}`);
+      }
+    } catch (e) {
+      console.log('[SAP Hours Agent] HRInfoSet fallback failed:', e.message);
+    }
+  }
+
+  // 4. Last resort: scrape the page for user info
+  if (!config.persNumber || !config.displayName) {
+    try {
+      if (!config.displayName) {
+        const shellHeader = document.querySelector('#meAreaHeaderButton .sapUShellShellHeadUsrItmName');
+        if (shellHeader) config.displayName = shellHeader.textContent.trim();
+      }
+      console.log(`[SAP Hours Agent] Page scrape: name=${config.displayName}`);
+    } catch (e) {
+      console.log('[SAP Hours Agent] Page scrape failed:', e.message);
+    }
+  }
+
+  // Cache result
+  if (config.persNumber) {
+    chrome.storage.local.set({ sapUserConfig: config });
+    console.log('[SAP Hours Agent] User config discovered and cached:', config.displayName, config.persNumber);
+  } else {
+    console.warn('[SAP Hours Agent] Could not discover personnel number. Some features may not work.');
+  }
+
+  return config;
+}
+
+// --- Initialize ---
+
+async function initUserConfig() {
+  userConfig = await discoverUserInfo();
+  PERS_NUMBER = userConfig.persNumber;
+  USER_NAME = userConfig.userName;
+
+  // Notify the iframe that config is ready
+  const iframe = document.getElementById('sap-agent-iframe');
+  if (iframe && iframe.contentWindow) {
+    iframe.contentWindow.postMessage({
+      source: 'sap-hours-agent-response',
+      type: 'USER_CONFIG_READY',
+      config: userConfig,
+    }, '*');
+  }
+}
+
+// Start discovery immediately
+initUserConfig();
 
 // --- Inject Agent Panel into SAP page ---
 
@@ -15,7 +161,6 @@ let panelVisible = true;
 function injectAgentPanel() {
   if (document.getElementById('sap-hours-agent-root')) return;
 
-  // Container
   const root = document.createElement('div');
   root.id = 'sap-hours-agent-root';
   root.style.cssText = `
@@ -29,7 +174,6 @@ function injectAgentPanel() {
     pointer-events: none;
   `;
 
-  // Toggle tab (always visible on the edge)
   const toggle = document.createElement('div');
   toggle.id = 'sap-agent-toggle';
   toggle.innerHTML = `<span style="writing-mode: vertical-rl; text-orientation: mixed; font-size: 12px; font-weight: 600; letter-spacing: 1px;">SAP AI</span>`;
@@ -52,7 +196,6 @@ function injectAgentPanel() {
   toggle.addEventListener('mouseenter', () => { toggle.style.background = '#c73652'; });
   toggle.addEventListener('mouseleave', () => { toggle.style.background = '#e94560'; });
 
-  // Panel container
   const panel = document.createElement('div');
   panel.id = 'sap-agent-panel';
   panel.style.cssText = `
@@ -66,7 +209,6 @@ function injectAgentPanel() {
     overflow: hidden;
   `;
 
-  // Iframe loads sidepanel.html from extension
   const iframe = document.createElement('iframe');
   iframe.id = 'sap-agent-iframe';
   iframe.src = chrome.runtime.getURL('sidepanel.html');
@@ -82,7 +224,6 @@ function injectAgentPanel() {
   root.appendChild(panel);
   document.body.appendChild(root);
 
-  // Toggle click
   toggle.addEventListener('click', () => {
     togglePanel();
   });
@@ -92,7 +233,6 @@ function injectAgentPanel() {
 
 function togglePanel() {
   const panel = document.getElementById('sap-agent-panel');
-  const toggle = document.getElementById('sap-agent-toggle');
   if (!panel) return;
 
   panelVisible = !panelVisible;
@@ -120,7 +260,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
-  // Keep existing handlers for backward compatibility (popup mode)
   if (msg.type === 'GET_STATE') {
     getPageState().then(sendResponse).catch(e => sendResponse({ error: e.message }));
     return true;
@@ -139,6 +278,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'GET_RECORDED_HOURS') {
     getRecordedHours(msg.startDate, msg.endDate).then(sendResponse).catch(e => sendResponse({ entries: [], totalHours: 0, error: e.message }));
+    return true;
+  }
+  if (msg.type === 'GET_USER_CONFIG') {
+    const respond = async () => {
+      if (!userConfig) await initUserConfig();
+      sendResponse(userConfig);
+    };
+    respond();
+    return true;
+  }
+  if (msg.type === 'GET_FAVORITES') {
+    getFavoriteProjects().then(sendResponse).catch(e => sendResponse([]));
+    return true;
+  }
+  if (msg.type === 'GET_CALENDAR_STATUS') {
+    getCalendarStatus(msg.referenceDate).then(sendResponse).catch(e => sendResponse({ days: [], error: e.message }));
+    return true;
+  }
+  if (msg.type === 'GET_WEEK_TOTAL') {
+    getWeekTotal().then(sendResponse).catch(e => sendResponse({ hours: 0, error: e.message }));
     return true;
   }
 });
@@ -172,6 +331,19 @@ window.addEventListener('message', async (event) => {
         minimizePanel();
         result = { ok: true };
         break;
+      case 'GET_USER_CONFIG':
+        if (!userConfig) await initUserConfig();
+        result = userConfig;
+        break;
+      case 'GET_FAVORITES':
+        result = await getFavoriteProjects();
+        break;
+      case 'GET_CALENDAR_STATUS':
+        result = await getCalendarStatus(payload.referenceDate);
+        break;
+      case 'GET_WEEK_TOTAL':
+        result = await getWeekTotal();
+        break;
       default:
         result = { error: `Unknown message type: ${type}` };
     }
@@ -180,7 +352,6 @@ window.addEventListener('message', async (event) => {
     result = { error: e.message };
   }
 
-  // Send response back to iframe
   const iframe = document.getElementById('sap-agent-iframe');
   if (iframe && iframe.contentWindow) {
     iframe.contentWindow.postMessage({
@@ -209,7 +380,7 @@ async function getPageState() {
     const dayTabs = readDayTabs();
     const currentEntries = readCurrentEntries();
     const totalHours = readTotalHours();
-    const favoriteProjects = readFavoriteProjects();
+    const favoriteProjects = await getFavoriteProjects();
 
     return {
       page: 'timeEntry',
@@ -259,7 +430,26 @@ function readTotalHours() {
   return null;
 }
 
-function readFavoriteProjects() {
+async function getFavoriteProjects() {
+  // Get favorites via OData (NavFavSet) — much more reliable than DOM scraping
+  if (!USER_NAME) return [];
+  try {
+    const filter = `UserName eq '${USER_NAME}'`;
+    const results = await sapODataGet('HRInfoSet', filter, 'NavFavSet');
+    if (results.length > 0 && results[0].NavFavSet) {
+      const favs = results[0].NavFavSet.results || [];
+      return favs.map(f => ({
+        project: f.ProjectName,
+        projectDesc: f.ProjectDesc,
+        activity: f.Activity,
+        activityDesc: f.ActivityDesc,
+        network: f.Network,
+      }));
+    }
+  } catch (e) {
+    console.log('[SAP Hours Agent] NavFavSet fetch failed, falling back to DOM:', e.message);
+  }
+  // Fallback to DOM scraping
   const projects = [];
   const rows = document.querySelectorAll('.sapMListItems .sapMLIB, .sapMList .sapMLIB');
   for (const row of rows) {
@@ -272,12 +462,140 @@ function readFavoriteProjects() {
       }
     }
   }
-  if (projects.length === 0) {
-    const text = document.body.innerText;
-    const matches = text.match(/[A-Z]{2,5}\.\w+\s*\/\s*[^\n]+/g);
-    if (matches) matches.forEach((m) => projects.push({ project: m.trim(), activity: '' }));
-  }
   return projects;
+}
+
+// --- Calendar Status (which days have hours) ---
+
+async function getCalendarStatus(referenceDate) {
+  if (!PERS_NUMBER) return { days: [], error: 'No personnel number' };
+  const workHours = userConfig?.workHours || '08';
+  const dateStr = `datetime'${referenceDate}T15:00:00'`;
+  const filter = `PersNumber eq '${PERS_NUMBER}' and Wkhrs eq '${workHours}' and Date eq ${dateStr}`;
+  try {
+    const results = await sapODataGet('CalendarMarkingSet', filter);
+    const days = results.map(r => ({
+      date: sapDateToISO(r.Date),
+      hours: parseFloat(r.Hours),
+      tooltip: r.Tooltip,
+      color: r.Color,
+      complete: r.Color === 'limegreen',
+    }));
+    return { days };
+  } catch (e) {
+    return { days: [], error: e.message };
+  }
+}
+
+// --- Week Total (lightweight) ---
+
+async function getWeekTotal() {
+  try {
+    const url = `${SAP_ODATA_BASE}/DynTileInfoSet('WeekHours')?${SAP_CLIENT}&$format=json&sap-language=EN`;
+    const resp = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+    });
+    if (!resp.ok) throw new Error(`${resp.status}`);
+    const data = await resp.json();
+    const d = data.d || data;
+    return {
+      hours: parseFloat(d.number) || 0,
+      label: d.numberUnit || 'Hours this week',
+    };
+  } catch (e) {
+    return { hours: 0, error: e.message };
+  }
+}
+
+// --- Delete Time Entry ---
+
+async function deleteTimeEntry(counter) {
+  if (!csrfToken) await fetchCsrfToken();
+  const url = `${SAP_ODATA_BASE}/TimeEntrySet('${counter}')?${SAP_CLIENT}`;
+  console.log(`[SAP Hours Agent] DELETE: ${url}`);
+  const resp = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      'x-csrf-token': csrfToken,
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+  });
+  if (!resp.ok) {
+    if (resp.status === 403) {
+      await fetchCsrfToken();
+      return deleteTimeEntry(counter);
+    }
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`DELETE failed ${resp.status}: ${errText.substring(0, 200)}`);
+  }
+  return { success: true, message: `Entry ${counter} deleted` };
+}
+
+// --- Copy/Move Entries Between Weeks ---
+
+async function copyWeekEntries(fromDate, toDate, move) {
+  if (!csrfToken) await fetchCsrfToken();
+
+  // First get entries from the source week
+  const fromStart = fromDate;
+  const fromEnd = new Date(new Date(fromDate + 'T12:00:00').getTime() + 4 * 86400000).toISOString().split('T')[0];
+  const sourceEntries = await getRecordedHours(fromStart, fromEnd);
+
+  if (!sourceEntries.entries || sourceEntries.entries.length === 0) {
+    return { success: false, error: 'No entries found in source week to copy' };
+  }
+
+  const payload = {
+    DateFrom: `${fromDate}T11:00:00`,
+    DateTo: `${toDate}T11:00:00`,
+    Move: move ? 'X' : '',
+    NavTimeEntrySet: sourceEntries.entries.map(e => ({
+      Counter: e.counter || '1',
+      Workdate: `${e.date}T11:00:00`,
+      PersNumber: PERS_NUMBER,
+      Pspid: e.project,
+      Activity: e.activity,
+      Catshours: String(e.hours),
+      AbsAttType: '0800',
+    })),
+  };
+
+  const result = await sapODataBatchPost('TimeEntryCopyToSet', payload);
+  return result;
+}
+
+// --- Manage Favorites ---
+
+async function addFavorite(projectId, activityCode, description) {
+  if (!csrfToken) await fetchCsrfToken();
+  const payload = {
+    PersNumber: PERS_NUMBER,
+    ProjectName: projectId,
+    Activity: activityCode,
+    Description: description || '',
+  };
+  return sapODataBatchPost('FavoriteSet', payload);
+}
+
+async function removeFavorite(projectId, activityCode) {
+  if (!csrfToken) await fetchCsrfToken();
+  const url = `${SAP_ODATA_BASE}/FavoriteSet(PersNumber='${PERS_NUMBER}',ProjectName='${projectId}',Activity='${activityCode}')?${SAP_CLIENT}`;
+  console.log(`[SAP Hours Agent] DELETE favorite: ${url}`);
+  const resp = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      'x-csrf-token': csrfToken,
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+  });
+  if (!resp.ok) {
+    if (resp.status === 403) {
+      await fetchCsrfToken();
+      return removeFavorite(projectId, activityCode);
+    }
+    throw new Error(`DELETE favorite failed ${resp.status}`);
+  }
+  return { success: true, message: `Favorite ${projectId}/${activityCode} removed` };
 }
 
 // --- OData API Helpers ---
@@ -287,8 +605,11 @@ let csrfToken = null;
 async function fetchCsrfToken() {
   try {
     const resp = await fetch(`${SAP_ODATA_BASE}/?${SAP_CLIENT}`, {
-      method: 'GET',
-      headers: { 'x-csrf-token': 'Fetch', 'Accept': 'application/json' },
+      method: 'HEAD',
+      headers: {
+        'x-csrf-token': 'Fetch',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
     });
     csrfToken = resp.headers.get('x-csrf-token') || '';
     console.log('[SAP Hours Agent] CSRF token fetched');
@@ -362,6 +683,11 @@ async function sapODataBatchPost(entitySet, payload) {
       'Content-Type': `multipart/mixed;boundary=${batchBoundary}`,
       'x-csrf-token': csrfToken,
       'Accept': 'multipart/mixed',
+      'DataServiceVersion': '2.0',
+      'MaxDataServiceVersion': '2.0',
+      'X-Requested-With': 'XMLHttpRequest',
+      'sap-cancel-on-close': 'true',
+      'sap-contextid-accept': 'header',
     },
     body: batchBody,
   });
@@ -377,13 +703,9 @@ async function sapODataBatchPost(entitySet, payload) {
   const responseText = await resp.text();
   console.log('[SAP Hours Agent] Batch response FULL:', responseText);
 
-  // Parse error from SAP batch response - look for error message in various formats
   if (responseText.includes('"error"') || responseText.match(/HTTP\/1\.1\s+[45]\d\d/)) {
-    // Try structured error: {"error":{"message":{"value":"..."}}}
     const structuredErr = responseText.match(/"message"\s*:\s*\{\s*"lang"\s*:\s*"[^"]*"\s*,\s*"value"\s*:\s*"([^"]+)"/);
-    // Try simple error: {"message":"..."}
     const simpleErr = responseText.match(/"message"\s*:\s*"([^"]+)"/);
-    // Try innerError details
     const innerErr = responseText.match(/"innererror"[\s\S]*?"message"\s*:\s*"([^"]+)"/);
 
     const errMsg = structuredErr?.[1] || innerErr?.[1] || simpleErr?.[1] || 'Unknown SAP error';
@@ -460,6 +782,7 @@ async function getRecordedHours(startDate, endDate) {
   try {
     const results = await sapODataGet('TimeEntrySet', filter);
     const entries = results.map((r) => ({
+      counter: r.Counter,
       date: sapDateToISO(r.Workdate),
       project: r.Pspid,
       projectName: r.Pdesc,
@@ -509,6 +832,18 @@ async function executeAction(action) {
   try {
     if (action.type === 'ENTER_DAY') {
       return await enterDayViaAPI(action.date, action.entries);
+    }
+    if (action.type === 'DELETE_ENTRY') {
+      return await deleteTimeEntry(action.counter);
+    }
+    if (action.type === 'COPY_WEEK') {
+      return await copyWeekEntries(action.fromDate, action.toDate, action.move);
+    }
+    if (action.type === 'ADD_FAVORITE') {
+      return await addFavorite(action.projectId, action.activity, action.description);
+    }
+    if (action.type === 'REMOVE_FAVORITE') {
+      return await removeFavorite(action.projectId, action.activity);
     }
     return { success: false, error: `Unknown action: ${action.type}` };
   } catch (err) {
@@ -574,7 +909,7 @@ async function enterDayViaAPI(dateStr, entries) {
         Zlstar: defaults.Zlstar || 'ZADMIN',
         Extref: defaults.Extref || '',
         Catshours: String(entry.hours),
-        Catstime: 'P00DT00H00M00S',
+        Catstime: 'PT00H00M00S',
         Starttime: 'PT00H00M00S',
         Endtime: 'PT00H00M00S',
         Description: entry.description || entry.projectName || 'Time entry',
@@ -589,8 +924,8 @@ async function enterDayViaAPI(dateStr, entries) {
         Zadesc: defaults.Zadesc || '',
         Unit: defaults.Unit || '',
         AllDayFlag: false,
-        Shorttext: '',
-        Longtext: false,
+        Shorttext: defaults.Shorttext || 'Fiori Time Entry',
+        Longtext: true,
         Row: 0,
         Status: '',
         Statustext: '',
@@ -643,7 +978,6 @@ async function enterDayViaAPI(dateStr, entries) {
   const failCount = results.filter((r) => !r.success).length;
 
   if (successCount > 0) {
-    // Notify iframe to save state before reload
     const iframe = document.getElementById('sap-agent-iframe');
     if (iframe && iframe.contentWindow) {
       iframe.contentWindow.postMessage({ source: 'sap-hours-agent-response', type: 'SAVE_BEFORE_RELOAD' }, '*');
@@ -656,12 +990,6 @@ async function enterDayViaAPI(dateStr, entries) {
     message: `${successCount}/${entries.length} entries created${failCount > 0 ? ` (${failCount} failed)` : ''}`,
     details: results,
   };
-}
-
-// --- Helpers ---
-
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // --- Auto-inject panel on SAP pages ---
