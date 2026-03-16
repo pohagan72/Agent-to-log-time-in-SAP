@@ -3,3 +3,4 @@ node_modules/
 .claude/
 extension/config.js
 extension/manifest.json
+proxy/deploy.zip

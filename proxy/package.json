@@ -1,0 +1,9 @@
+{
+  "name": "sap-hours-proxy",
+  "version": "1.0.0",
+  "description": "Azure Function proxy for Claude API with Entra ID auth",
+  "main": "claude-proxy/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
