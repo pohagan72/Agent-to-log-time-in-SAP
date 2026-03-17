@@ -6,6 +6,8 @@ const minimizeBtn = document.getElementById('minimizeBtn');
 
 let conversationHistory = [];
 let userConfig = null;
+let entraToken = null;
+let entraTokenExpiry = 0;
 
 // Detect if running inside an iframe (embedded in SAP page) vs standalone popup
 const isEmbedded = window.parent !== window;
@@ -479,6 +481,54 @@ async function findSAPTab() {
   return sapTabs.length > 0 ? sapTabs[0] : null;
 }
 
+// --- Entra ID Authentication (for proxy mode) ---
+
+async function getEntraToken() {
+  // Return cached token if still valid (with 5min buffer)
+  if (entraToken && Date.now() < entraTokenExpiry - 300000) {
+    return entraToken;
+  }
+
+  const clientId = CONFIG.entraClientId;
+  const tenantId = CONFIG.entraTenantId;
+  if (!clientId || !tenantId) return null;
+
+  const redirectUrl = chrome.identity.getRedirectURL();
+  const nonce = crypto.randomUUID();
+  const authUrl = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize?` +
+    `client_id=${encodeURIComponent(clientId)}` +
+    `&response_type=id_token` +
+    `&redirect_uri=${encodeURIComponent(redirectUrl)}` +
+    `&scope=openid%20email%20profile` +
+    `&response_mode=fragment` +
+    `&nonce=${nonce}`;
+
+  try {
+    // Try silent first (SSO), then interactive
+    let responseUrl;
+    try {
+      responseUrl = await chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: false });
+    } catch (e) {
+      responseUrl = await chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true });
+    }
+
+    const hash = new URL(responseUrl).hash;
+    const params = new URLSearchParams(hash.substring(1));
+    const idToken = params.get('id_token');
+    if (!idToken) throw new Error('No id_token in response');
+
+    // Decode to get expiry (no verification needed — proxy validates)
+    const payload = JSON.parse(atob(idToken.split('.')[1]));
+    entraToken = idToken;
+    entraTokenExpiry = (payload.exp || 0) * 1000;
+    console.log('[SAP Hours Agent] Entra ID token acquired for:', payload.preferred_username);
+    return idToken;
+  } catch (e) {
+    console.error('[SAP Hours Agent] Entra ID auth failed:', e.message);
+    return null;
+  }
+}
+
 // --- Claude API ---
 
 async function callClaude(userMessage, sapState) {
@@ -646,19 +696,43 @@ RULES:
 - If unsure about anything, ask`;
 
   try {
-    const resp = await fetch(CONFIG.endpoint, {
-      method: 'POST',
-      headers: {
+    // Use proxy (Entra ID auth) if configured, otherwise direct API call
+    let fetchUrl, fetchHeaders, fetchBody;
+
+    if (CONFIG.proxyEndpoint) {
+      const token = await getEntraToken();
+      if (!token) {
+        return { error: 'Entra ID authentication failed. Please sign in with your Epiq account.' };
+      }
+      fetchUrl = CONFIG.proxyEndpoint;
+      fetchHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      };
+      fetchBody = {
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: conversationHistory,
+      };
+    } else {
+      fetchUrl = CONFIG.endpoint;
+      fetchHeaders = {
         'Content-Type': 'application/json',
         'x-api-key': CONFIG.apiKey,
         'anthropic-version': CONFIG.apiVersion,
-      },
-      body: JSON.stringify({
+      };
+      fetchBody = {
         model: CONFIG.model,
         max_tokens: 1024,
         system: systemPrompt,
         messages: conversationHistory,
-      }),
+      };
+    }
+
+    const resp = await fetch(fetchUrl, {
+      method: 'POST',
+      headers: fetchHeaders,
+      body: JSON.stringify(fetchBody),
     });
 
     if (!resp.ok) {

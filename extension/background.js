@@ -1,5 +1,6 @@
 // Background service worker for SAP Hours Agent
 console.log('[SAP Hours Agent] Service worker loaded');
+console.log('[SAP Hours Agent] Extension redirect URL:', chrome.identity.getRedirectURL());
 
 // When extension icon is clicked, toggle the panel on the active tab
 chrome.action.onClicked.addListener(async (tab) => {
