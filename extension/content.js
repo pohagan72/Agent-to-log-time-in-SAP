@@ -1,7 +1,14 @@
 // SAP Fiori Time Entry - Content Script
 // CONFIG is loaded before this script via manifest.json content_scripts order
 
-console.log('[SAP Hours Agent] Content script loaded');
+console.log('[SAP Hours Agent] Content script loaded on:', window.location.pathname);
+
+// Skip non-FLP pages (SAML auth callbacks, etc.) — discovery and panel are useless there
+const NON_FLP_PATHS = ['/sap/saml2/', '/sap/public/', '/sap/bc/sec/'];
+const isNonFLPPage = NON_FLP_PATHS.some(p => window.location.pathname.startsWith(p));
+if (isNonFLPPage) {
+  console.log('[SAP Hours Agent] Skipping — not an FLP page');
+}
 
 const SAP_ODATA_BASE = CONFIG.sapODataPath;
 const SAP_CLIENT = `sap-client=${CONFIG.sapClient}`;
@@ -127,10 +134,27 @@ async function discoverUserInfo() {
     chrome.storage.local.set({ sapUserConfig: config });
     console.log('[SAP Hours Agent] User config discovered and cached:', config.displayName, config.persNumber);
   } else {
-    console.warn('[SAP Hours Agent] Could not discover personnel number. Some features may not work.');
+    console.warn('[SAP Hours Agent] Could not discover personnel number. Will retry...');
   }
 
   return config;
+}
+
+// Retry discovery after a delay (FLP may still be bootstrapping)
+let discoveryRetries = 0;
+const MAX_DISCOVERY_RETRIES = 3;
+const DISCOVERY_RETRY_DELAY = 3000; // 3 seconds
+
+async function retryDiscoveryIfNeeded() {
+  if (PERS_NUMBER || discoveryRetries >= MAX_DISCOVERY_RETRIES) return;
+  discoveryRetries++;
+  console.log(`[SAP Hours Agent] Retry discovery attempt ${discoveryRetries}/${MAX_DISCOVERY_RETRIES}...`);
+  // Clear cache so we re-discover fresh
+  await new Promise(resolve => chrome.storage.local.remove('sapUserConfig', resolve));
+  await initUserConfig();
+  if (!PERS_NUMBER && discoveryRetries < MAX_DISCOVERY_RETRIES) {
+    setTimeout(retryDiscoveryIfNeeded, DISCOVERY_RETRY_DELAY);
+  }
 }
 
 // --- Initialize ---
@@ -151,8 +175,14 @@ async function initUserConfig() {
   }
 }
 
-// Start discovery immediately
-initUserConfig();
+// Start discovery immediately (skip on auth/SAML pages)
+if (!isNonFLPPage) {
+  initUserConfig().then(() => {
+    if (!PERS_NUMBER) {
+      setTimeout(retryDiscoveryIfNeeded, DISCOVERY_RETRY_DELAY);
+    }
+  });
+}
 
 // --- Inject Agent Panel into SAP page ---
 
@@ -992,6 +1022,8 @@ async function enterDayViaAPI(dateStr, entries) {
   };
 }
 
-// --- Auto-inject panel on SAP pages ---
+// --- Auto-inject panel on SAP pages (skip auth/SAML pages) ---
 
-injectAgentPanel();
+if (!isNonFLPPage) {
+  injectAgentPanel();
+}

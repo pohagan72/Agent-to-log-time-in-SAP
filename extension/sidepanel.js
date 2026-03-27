@@ -696,43 +696,23 @@ RULES:
 - If unsure about anything, ask`;
 
   try {
-    // Use proxy (Entra ID auth) if configured, otherwise direct API call
-    let fetchUrl, fetchHeaders, fetchBody;
-
-    if (CONFIG.proxyEndpoint) {
-      const token = await getEntraToken();
-      if (!token) {
-        return { error: 'Entra ID authentication failed. Please sign in with your Epiq account.' };
-      }
-      fetchUrl = CONFIG.proxyEndpoint;
-      fetchHeaders = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      };
-      fetchBody = {
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: conversationHistory,
-      };
-    } else {
-      fetchUrl = CONFIG.endpoint;
-      fetchHeaders = {
-        'Content-Type': 'application/json',
-        'x-api-key': CONFIG.apiKey,
-        'anthropic-version': CONFIG.apiVersion,
-      };
-      fetchBody = {
-        model: CONFIG.model,
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: conversationHistory,
-      };
+    // Authenticate via Entra ID and call through proxy (API key stays server-side)
+    const token = await getEntraToken();
+    if (!token) {
+      return { error: 'Entra ID authentication failed. Please sign in with your Epiq account.' };
     }
 
-    const resp = await fetch(fetchUrl, {
+    const resp = await fetch(CONFIG.proxyEndpoint, {
       method: 'POST',
-      headers: fetchHeaders,
-      body: JSON.stringify(fetchBody),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: conversationHistory,
+      }),
     });
 
     if (!resp.ok) {
