@@ -13,6 +13,17 @@ if (isNonFLPPage) {
 const SAP_ODATA_BASE = CONFIG.sapODataPath;
 const SAP_CLIENT = `sap-client=${CONFIG.sapClient}`;
 
+// Sanitize values interpolated into OData $filter strings to prevent injection.
+// OData string literals use single quotes; escape by doubling them.
+// Also strip control characters that could break the query.
+function odataSanitize(val) {
+  if (typeof val !== 'string') return '';
+  return val.replace(/[\x00-\x1f\x7f]/g, '').replace(/'/g, "''");
+}
+
+// Extension origin for secure postMessage targeting
+const EXTENSION_ORIGIN = chrome.runtime.getURL('').replace(/\/$/, '');
+
 // User info - populated by auto-discovery
 let PERS_NUMBER = '';
 let USER_NAME = '';
@@ -171,7 +182,7 @@ async function initUserConfig() {
       source: 'sap-hours-agent-response',
       type: 'USER_CONFIG_READY',
       config: userConfig,
-    }, '*');
+    }, EXTENSION_ORIGIN);
   }
 }
 
@@ -336,6 +347,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 window.addEventListener('message', async (event) => {
   if (!event.data || event.data.source !== 'sap-hours-agent') return;
+  // Only accept messages from our extension iframe
+  if (event.origin !== EXTENSION_ORIGIN) return;
 
   const { id, type, payload } = event.data;
   let result;
@@ -388,7 +401,7 @@ window.addEventListener('message', async (event) => {
       source: 'sap-hours-agent-response',
       id,
       result,
-    }, '*');
+    }, EXTENSION_ORIGIN);
   }
 });
 
@@ -541,7 +554,7 @@ async function getWeekTotal() {
 
 async function deleteTimeEntry(counter) {
   if (!csrfToken) await fetchCsrfToken();
-  const url = `${SAP_ODATA_BASE}/TimeEntrySet('${counter}')?${SAP_CLIENT}`;
+  const url = `${SAP_ODATA_BASE}/TimeEntrySet('${odataSanitize(counter)}')?${SAP_CLIENT}`;
   console.log(`[SAP Hours Agent] DELETE: ${url}`);
   const resp = await fetch(url, {
     method: 'DELETE',
@@ -609,7 +622,7 @@ async function addFavorite(projectId, activityCode, description) {
 
 async function removeFavorite(projectId, activityCode) {
   if (!csrfToken) await fetchCsrfToken();
-  const url = `${SAP_ODATA_BASE}/FavoriteSet(PersNumber='${PERS_NUMBER}',ProjectName='${projectId}',Activity='${activityCode}')?${SAP_CLIENT}`;
+  const url = `${SAP_ODATA_BASE}/FavoriteSet(PersNumber='${odataSanitize(PERS_NUMBER)}',ProjectName='${odataSanitize(projectId)}',Activity='${odataSanitize(activityCode)}')?${SAP_CLIENT}`;
   console.log(`[SAP Hours Agent] DELETE favorite: ${url}`);
   const resp = await fetch(url, {
     method: 'DELETE',
@@ -757,7 +770,7 @@ async function sapODataBatchPost(entitySet, payload) {
 
 async function searchProjects(query) {
   if (!query || query.length < 2) return { projects: [] };
-  const q = query.toLowerCase();
+  const q = odataSanitize(query.toLowerCase());
   const filter = `substringof('${q}',tolower(Project)) or substringof('${q}',tolower(Description))`;
   try {
     const results = await sapODataGet('ProjectSearchSet', filter);
@@ -776,7 +789,7 @@ async function searchProjects(query) {
 async function getProjectActivities(projectId, role) {
   if (!projectId) return { activities: [] };
   role = role || 'ZADMIN';
-  const filter = `Pspid eq '${projectId}' and Role eq '${role}'`;
+  const filter = `Pspid eq '${odataSanitize(projectId)}' and Role eq '${odataSanitize(role)}'`;
   try {
     const results = await sapODataGet('ProjectActivitySet', filter);
     console.log(`[SAP Hours Agent] Activities for ${projectId}: ${results.length} results`);
@@ -803,9 +816,9 @@ function sapDateToISO(sapDate) {
 }
 
 async function getRecordedHours(startDate, endDate) {
-  const startDt = `datetime'${startDate}T00:00:00'`;
-  const endDt = `datetime'${endDate}T23:59:59'`;
-  const filter = `Workdate ge ${startDt} and Workdate le ${endDt} and PersNumber eq '${PERS_NUMBER}'`;
+  const startDt = `datetime'${odataSanitize(startDate)}T00:00:00'`;
+  const endDt = `datetime'${odataSanitize(endDate)}T23:59:59'`;
+  const filter = `Workdate ge ${startDt} and Workdate le ${endDt} and PersNumber eq '${odataSanitize(PERS_NUMBER)}'`;
 
   console.log(`[SAP Hours Agent] Getting recorded hours: ${startDate} to ${endDate}`);
 
@@ -840,7 +853,7 @@ async function getRecordedHours(startDate, endDate) {
 // --- Get Entry Defaults ---
 
 async function getEntryDefaults(projectId, activityCode) {
-  const filter = `Pspid eq '${projectId}' and PersNumber eq '${PERS_NUMBER}' and Activity eq '${activityCode || ''}' and AbsAttType eq '0800'`;
+  const filter = `Pspid eq '${odataSanitize(projectId)}' and PersNumber eq '${odataSanitize(PERS_NUMBER)}' and Activity eq '${odataSanitize(activityCode || '')}' and AbsAttType eq '0800'`;
   console.log(`[SAP Hours Agent] Getting defaults: ${projectId} / ${activityCode}`);
   try {
     const results = await sapODataGet('TimeEntryDetailSet', filter, 'NavSubSet');
@@ -1010,7 +1023,7 @@ async function enterDayViaAPI(dateStr, entries) {
   if (successCount > 0) {
     const iframe = document.getElementById('sap-agent-iframe');
     if (iframe && iframe.contentWindow) {
-      iframe.contentWindow.postMessage({ source: 'sap-hours-agent-response', type: 'SAVE_BEFORE_RELOAD' }, '*');
+      iframe.contentWindow.postMessage({ source: 'sap-hours-agent-response', type: 'SAVE_BEFORE_RELOAD' }, EXTENSION_ORIGIN);
     }
     setTimeout(() => window.location.reload(), 2000);
   }

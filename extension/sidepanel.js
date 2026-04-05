@@ -26,17 +26,20 @@ function postMessageToParent(type, payload) {
 
     pendingMessages[id] = { resolve, reject, timeout };
 
+    const targetOrigin = `https://${CONFIG.sapHostname}`;
     window.parent.postMessage({
       source: 'sap-hours-agent',
       id,
       type,
       payload,
-    }, '*');
+    }, targetOrigin);
   });
 }
 
-// Listen for responses from content script
+// Listen for responses from content script (SAP page origin only)
+const EXPECTED_ORIGIN = `https://${CONFIG.sapHostname}`;
 window.addEventListener('message', (event) => {
+  if (event.origin !== EXPECTED_ORIGIN) return;
   if (!event.data || event.data.source !== 'sap-hours-agent-response') return;
 
   // Handle save-before-reload signal
@@ -202,7 +205,14 @@ async function showWelcome() {
   try {
     const weekTotal = await getWeekTotal();
     if (weekTotal && !weekTotal.error) {
-      weekInfo = `\nYou have **${weekTotal.hours}h** logged this week so far.`;
+      const today = new Date();
+      const dayOfWeek = today.getDay(); // 0=Sun, 1=Mon, ...
+      const mon = new Date(today);
+      mon.setDate(today.getDate() - ((dayOfWeek + 6) % 7));
+      const sun = new Date(mon);
+      sun.setDate(mon.getDate() + 6);
+      const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      weekInfo = `\nYou have **${weekTotal.hours}h** logged this week (${fmt(mon)}–${fmt(sun)}).`;
     }
   } catch (e) { /* ignore */ }
 
@@ -545,158 +555,26 @@ async function callClaude(userMessage, sapState) {
     userConfig = await loadUserConfig();
   }
 
-  const today = new Date().toISOString().split('T')[0];
-  const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-
   const favProjects = sapState.favoriteProjects || [];
 
-  let projectSection = '';
-  if (favProjects.length > 0) {
-    projectSection += 'FAVORITE PROJECTS (from SAP):\n';
-    favProjects.forEach((p, i) => {
-      if (p.projectDesc) {
-        projectSection += `${i + 1}. ${p.project} — ${p.projectDesc} (Activity: ${p.activity} / ${p.activityDesc || ''})\n`;
-      } else if (typeof p === 'object') {
-        projectSection += `${i + 1}. ${p.project} (Activity: ${p.activity})\n`;
-      } else {
-        projectSection += `${i + 1}. ${p}\n`;
-      }
-    });
-  }
-
-  const displayName = userConfig.displayName || 'User';
-  const company = userConfig.company || 'Unknown';
-  const persNumber = userConfig.persNumber || 'Unknown';
-  const costCenterDisplay = userConfig.costCenterName
-    ? `${userConfig.costCenter} / ${userConfig.costCenterName}`
-    : userConfig.costCenter || 'Unknown';
-  const defaultRole = userConfig.defaultRole || 'ZADMIN';
-
-  const systemPrompt = `You are an AI assistant embedded in a browser extension on the SAP Fiori Time Entry page. You help ${displayName} enter their weekly hours.
-
-CONTEXT:
-- Today is ${today} (${dayOfWeek})
-- ${displayName} works at ${company}, Personnel #${persNumber}
-- Cost Center: ${costCenterDisplay}
-- Default Role: ${defaultRole}
-- Standard work day: 8 hours, Mon-Fri
-- Last week = Mon-Fri of the week before today's week
-
-${projectSection || 'No favorites loaded from page.\n'}
-PROJECT SEARCH:
-You have access to SAP's full project database (thousands of projects). To search for a project, include a search action:
-
-\`\`\`json
-{"action": "SEARCH_PROJECTS", "query": "conference"}
-\`\`\`
-
-This will search both project IDs and descriptions. Use this when:
-- The user mentions an activity that doesn't clearly match a favorite
-- You want to find the right project for a specific type of work
-- The user asks what projects are available
-
-After finding the right project, you can look up its available activities:
-
-\`\`\`json
-{"action": "GET_ACTIVITIES", "projectId": "ADM.000022", "role": "ZADMIN"}
-\`\`\`
-
-LOOK UP RECORDED HOURS:
-You can look up what hours have already been recorded for any date range:
-
-\`\`\`json
-{"action": "GET_RECORDED_HOURS", "startDate": "2026-02-10", "endDate": "2026-02-14"}
-\`\`\`
-
-This returns all time entries with project, activity, hours, counter (ID), status (Approved/Pending), and description. Use this when:
-- The user asks what they recorded on a specific date or week
-- The user wants to check if hours are already entered before adding more
-- The user asks about their time entry history or status
-
-CHECK CALENDAR STATUS:
-Get a quick overview of which days in a month have hours entered:
-
-\`\`\`json
-{"action": "GET_CALENDAR_STATUS", "referenceDate": "2026-03-15"}
-\`\`\`
-
-Returns each day that has hours, whether it's complete (8h), and gaps. Use this to quickly identify missing days without fetching full entry details.
-
-GET WEEK TOTAL:
-Get the current week's total hours in a single call:
-
-\`\`\`json
-{"action": "GET_WEEK_TOTAL"}
-\`\`\`
-
-DELETE AN ENTRY:
-Delete a specific time entry by its counter ID (from GET_RECORDED_HOURS results):
-
-\`\`\`json
-{"action": "DELETE_ENTRY", "counter": "000055693654"}
-\`\`\`
-
-Always confirm with the user before deleting. Show them what will be deleted first.
-
-COPY WEEK:
-Copy all entries from one week's Monday to another week's Monday:
-
-\`\`\`json
-{"action": "COPY_WEEK", "fromDate": "2026-03-02", "toDate": "2026-03-09", "move": false}
-\`\`\`
-
-Set move=true to move entries instead of copy. Confirm with user first.
-
-MANAGE FAVORITES:
-Add or remove projects from the user's SAP favorites:
-
-\`\`\`json
-{"action": "ADD_FAVORITE", "projectId": "DEV.000982", "activity": "0010", "description": ""}
-\`\`\`
-
-\`\`\`json
-{"action": "REMOVE_FAVORITE", "projectId": "DEV.000982", "activity": "0010"}
-\`\`\`
-
-CURRENT SAP PAGE STATE:
-Day tabs: ${JSON.stringify(sapState.dayTabs || [])}
-Current entries: ${JSON.stringify(sapState.currentEntries || [])}
-Total hours: ${JSON.stringify(sapState.totalHours)}
-
-WORKFLOW:
-1. User describes their week
-2. Match activities to favorites if possible
-3. If unsure, SEARCH for the right project using the search action
-4. Once you have the right project, GET its activities to pick the right activity code
-5. Propose the time entries with a clear summary
-6. On user confirmation, submit with ENTER_TIME
-
-When ready to submit, include a JSON block with this exact format:
-
-\`\`\`json
-{"action": "ENTER_TIME", "entries": [
-  {"date": "YYYY-MM-DD", "projectId": "DEV.000982", "projectName": "Agentics AI - 2026", "activity": "Coding", "hours": 8, "description": "Worked on Agentics AI coding"},
-  ...
-]}
-\`\`\`
-
-IMPORTANT: Every entry MUST include a "description" field (SAP rejects entries without comments). Use a brief, professional description of the work.
-\`\`\`
-
-RULES:
-- Always confirm the plan with the user BEFORE including the ENTER_TIME, DELETE_ENTRY, or COPY_WEEK actions
-- When proposing entries, ALWAYS show a clear table/list that includes the date, project, hours, AND the description you plan to use for each entry. The description is a required field in SAP and will be visible to managers, so the user must verify it.
-- If the user says "yes", "do it", "go ahead", "submit", "looks good", etc., THEN include the action JSON
-- Use SEARCH_PROJECTS proactively when the user mentions non-obvious work (conferences, training, client work, etc.)
-- Use GET_CALENDAR_STATUS to quickly check which days need hours before proposing entries
-- Days should total 8 hours unless the user says otherwise
-- If the user says they took a day off, skip that day entirely (PTO is handled separately in SAP)
-- Generate professional, accurate descriptions based on what the user told you (e.g. "Agentics AI development and coding", "AI Platform requirements and design")
-- Be concise and friendly
-- If unsure about anything, ask`;
+  // Build context for server-side system prompt (no prompt sent from client)
+  const context = {
+    displayName: userConfig.displayName || 'User',
+    company: userConfig.company || 'Unknown',
+    persNumber: userConfig.persNumber || 'Unknown',
+    costCenter: userConfig.costCenter || '',
+    costCenterName: userConfig.costCenterName || '',
+    defaultRole: userConfig.defaultRole || 'ZADMIN',
+    favorites: favProjects,
+    sapState: {
+      dayTabs: sapState.dayTabs || [],
+      currentEntries: sapState.currentEntries || [],
+      totalHours: sapState.totalHours,
+    },
+  };
 
   try {
-    // Authenticate via Entra ID and call through proxy (API key stays server-side)
+    // Authenticate via Entra ID and call through proxy
     const token = await getEntraToken();
     if (!token) {
       return { error: 'Entra ID authentication failed. Please sign in with your Epiq account.' };
@@ -709,9 +587,8 @@ RULES:
         'Authorization': `Bearer ${token}`,
       },
       body: JSON.stringify({
-        max_tokens: 1024,
-        system: systemPrompt,
         messages: conversationHistory,
+        context: context,
       }),
     });
 
