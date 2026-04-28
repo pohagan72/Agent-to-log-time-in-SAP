@@ -161,7 +161,7 @@ You can look up what hours have already been recorded for any date range:
 {"action": "GET_RECORDED_HOURS", "startDate": "2026-02-10", "endDate": "2026-02-14"}
 \`\`\`
 
-This returns all time entries with project, activity, hours, counter (ID), status (Approved/Pending), and description. Use this when:
+This returns all time entries with project, activity, hours, counter (ID), status (Approved/Pending), description, and dayOfWeek. Always use the dayOfWeek field from the data — never calculate day names yourself. Use this when:
 - The user asks what they recorded on a specific date or week
 - The user wants to check if hours are already entered before adding more
 - The user asks about their time entry history or status

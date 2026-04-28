@@ -517,13 +517,18 @@ async function getCalendarStatus(referenceDate) {
   const filter = `PersNumber eq '${PERS_NUMBER}' and Wkhrs eq '${workHours}' and Date eq ${dateStr}`;
   try {
     const results = await sapODataGet('CalendarMarkingSet', filter);
-    const days = results.map(r => ({
-      date: sapDateToISO(r.Date),
-      hours: parseFloat(r.Hours),
-      tooltip: r.Tooltip,
-      color: r.Color,
-      complete: r.Color === 'limegreen',
-    }));
+    const days = results.map(r => {
+      const isoDate = sapDateToISO(r.Date);
+      const dayName = new Date(isoDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long' });
+      return {
+        date: isoDate,
+        dayOfWeek: dayName,
+        hours: parseFloat(r.Hours),
+        tooltip: r.Tooltip,
+        color: r.Color,
+        complete: r.Color === 'limegreen',
+      };
+    });
     return { days };
   } catch (e) {
     return { days: [], error: e.message };
@@ -824,18 +829,23 @@ async function getRecordedHours(startDate, endDate) {
 
   try {
     const results = await sapODataGet('TimeEntrySet', filter);
-    const entries = results.map((r) => ({
-      counter: r.Counter,
-      date: sapDateToISO(r.Workdate),
-      project: r.Pspid,
-      projectName: r.Pdesc,
-      activity: r.Activity,
-      activityName: r.Actdesc,
-      hours: parseFloat(r.Catshours),
-      status: r.Statustext || r.Status,
-      description: r.Description || '',
-      billing: r.Zbilling,
-    }));
+    const entries = results.map((r) => {
+      const isoDate = sapDateToISO(r.Workdate);
+      const dayName = new Date(isoDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long' });
+      return {
+        counter: r.Counter,
+        date: isoDate,
+        dayOfWeek: dayName,
+        project: r.Pspid,
+        projectName: r.Pdesc,
+        activity: r.Activity,
+        activityName: r.Actdesc,
+        hours: parseFloat(r.Catshours),
+        status: r.Statustext || r.Status,
+        description: r.Description || '',
+        billing: r.Zbilling,
+      };
+    });
 
     const totalHours = entries.reduce((sum, e) => sum + e.hours, 0);
     const byDate = {};
