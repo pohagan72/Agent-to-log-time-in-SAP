@@ -400,7 +400,7 @@ app.http('claude', {
     const endpoint = process.env.AZURE_CLAUDE_ENDPOINT;
     const model = process.env.AZURE_CLAUDE_MODEL || 'claude-sonnet-4-5';
     const apiVersion = process.env.AZURE_CLAUDE_API_VERSION || '2023-06-01';
-    const maxTokens = parseInt(process.env.MAX_TOKENS || '1024', 10);
+    const maxTokens = parseInt(process.env.MAX_TOKENS || '4096', 10);
 
     if (!apiKey || !endpoint) {
       context.error('Missing AZURE_CLAUDE_API_KEY or AZURE_CLAUDE_ENDPOINT');
