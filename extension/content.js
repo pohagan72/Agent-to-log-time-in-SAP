@@ -28,6 +28,7 @@ const EXTENSION_ORIGIN = chrome.runtime.getURL('').replace(/\/$/, '');
 let PERS_NUMBER = '';
 let USER_NAME = '';
 let userConfig = null;
+let iframeReady = false;
 
 // --- Auto-Discovery: detect user info from SAP APIs ---
 
@@ -175,9 +176,9 @@ async function initUserConfig() {
   PERS_NUMBER = userConfig.persNumber;
   USER_NAME = userConfig.userName;
 
-  // Notify the iframe that config is ready
+  // Notify the iframe that config is ready (only if iframe has loaded)
   const iframe = document.getElementById('sap-agent-iframe');
-  if (iframe && iframe.contentWindow) {
+  if (iframe && iframe.contentWindow && iframeReady) {
     iframe.contentWindow.postMessage({
       source: 'sap-hours-agent-response',
       type: 'USER_CONFIG_READY',
@@ -259,6 +260,16 @@ function injectAgentPanel() {
     border: none;
     background: #1a1a2e;
   `;
+  iframe.addEventListener('load', () => {
+    iframeReady = true;
+    if (userConfig) {
+      iframe.contentWindow.postMessage({
+        source: 'sap-hours-agent-response',
+        type: 'USER_CONFIG_READY',
+        config: userConfig,
+      }, EXTENSION_ORIGIN);
+    }
+  });
 
   panel.appendChild(iframe);
   root.appendChild(toggle);

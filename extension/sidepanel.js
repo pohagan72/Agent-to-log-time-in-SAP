@@ -709,13 +709,13 @@ async function processAgentResponse(response) {
           addMessage('system', `No hours recorded for ${action.startDate} to ${action.endDate}.`);
         } else {
           const summary = entries.map(e =>
-            `${e.date}: ${e.hours}h — ${e.project} (${e.projectName}) [${e.status}]`
+            `${e.date} (${e.dayOfWeek}): ${e.hours}h — ${e.project} (${e.projectName}) [${e.status}]`
           ).join('\n');
           addMessage('system', `Found ${entries.length} entries (${result.totalHours}h total):\n${summary}`);
         }
 
         const hoursMsg = entries.length > 0
-          ? `Recorded hours from ${action.startDate} to ${action.endDate} (${result.totalHours}h total):\n${entries.map(e => `- ${e.date}: ${e.hours}h on ${e.project} / ${e.projectName}, activity: ${e.activityName || e.activity}, counter: ${e.counter}, status: ${e.status}${e.description ? ', desc: ' + e.description : ''}`).join('\n')}`
+          ? `Recorded hours from ${action.startDate} to ${action.endDate} (${result.totalHours}h total):\n${entries.map(e => `- ${e.date} (${e.dayOfWeek}): ${e.hours}h on ${e.project} / ${e.projectName}, activity: ${e.activityName || e.activity}, counter: ${e.counter}, status: ${e.status}${e.description ? ', desc: ' + e.description : ''}`).join('\n')}`
           : `No hours recorded from ${action.startDate} to ${action.endDate}.`;
 
         conversationHistory.push({ role: 'user', content: `[SYSTEM: ${hoursMsg}]` });
@@ -740,7 +740,7 @@ async function processAgentResponse(response) {
         }
 
         const calMsg = days.length > 0
-          ? `Calendar status for month of ${action.referenceDate}:\n${days.map(d => `- ${d.date}: ${d.hours}h ${d.complete ? '(complete)' : '(INCOMPLETE)'}`).join('\n')}\nDays not listed have NO hours entered.`
+          ? `Calendar status for month of ${action.referenceDate}:\n${days.map(d => `- ${d.date} (${d.dayOfWeek}): ${d.hours}h ${d.complete ? '(complete)' : '(INCOMPLETE)'}`).join('\n')}\nDays not listed have NO hours entered.`
           : `No hours recorded in the month of ${action.referenceDate}.`;
 
         addMessage('system', calMsg);
