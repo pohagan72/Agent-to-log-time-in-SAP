@@ -385,6 +385,10 @@ window.addEventListener('message', async (event) => {
         minimizePanel();
         result = { ok: true };
         break;
+      case 'RELOAD_PAGE':
+        setTimeout(() => window.location.reload(), 1000);
+        result = { ok: true };
+        break;
       case 'GET_USER_CONFIG':
         if (!userConfig) await initUserConfig();
         result = userConfig;
@@ -1041,16 +1045,9 @@ async function enterDayViaAPI(dateStr, entries) {
   const successCount = results.filter((r) => r.success).length;
   const failCount = results.filter((r) => !r.success).length;
 
-  if (successCount > 0) {
-    const iframe = document.getElementById('sap-agent-iframe');
-    if (iframe && iframe.contentWindow) {
-      iframe.contentWindow.postMessage({ source: 'sap-hours-agent-response', type: 'SAVE_BEFORE_RELOAD' }, EXTENSION_ORIGIN);
-    }
-    setTimeout(() => window.location.reload(), 2000);
-  }
-
   return {
     success: failCount === 0,
+    successCount,
     message: `${successCount}/${entries.length} entries created${failCount > 0 ? ` (${failCount} failed)` : ''}`,
     details: results,
   };

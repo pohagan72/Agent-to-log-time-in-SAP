@@ -885,7 +885,11 @@ async function executeTimeEntries(entries) {
     }
   }
 
-  addMessage('system', 'Done! Please review the entries in SAP.');
+  addMessage('system', 'Done! SAP page will refresh to show new entries.');
+  saveState();
+  if (isEmbedded) {
+    postMessageToParent('RELOAD_PAGE', {}).catch(() => {});
+  }
 }
 
 // --- Start ---
