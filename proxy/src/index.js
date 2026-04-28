@@ -250,8 +250,7 @@ RULES:
 
 // --- Input Validation ---
 
-const MAX_MESSAGE_LENGTH = 2000;   // per individual message content
-const MAX_MESSAGES = 50;           // conversation history limit
+const MAX_MESSAGES = 200;          // conversation history limit
 const MAX_CONTEXT_FIELD = 500;     // per context string field
 const ALLOWED_ROLES = ['user', 'assistant'];
 
@@ -264,7 +263,6 @@ function validateMessages(messages) {
     if (!msg || typeof msg !== 'object') return `messages[${i}] must be an object`;
     if (!ALLOWED_ROLES.includes(msg.role)) return `messages[${i}].role must be "user" or "assistant"`;
     if (typeof msg.content !== 'string') return `messages[${i}].content must be a string`;
-    if (msg.content.length > MAX_MESSAGE_LENGTH) return `messages[${i}].content too long (max ${MAX_MESSAGE_LENGTH} chars)`;
   }
   return null;
 }
