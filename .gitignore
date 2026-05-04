@@ -4,3 +4,4 @@ node_modules/
 extension/config.js
 extension/manifest.json
 proxy/deploy.zip
+sap-agent-browser-extension.zip
