@@ -506,7 +506,7 @@ async function findSAPTab() {
 // --- Easy Auth login (opens proxy login page in a new tab) ---
 
 async function triggerEasyAuthLogin() {
-  const authUrl = 'https://sap-hours-proxy.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=/api/claude';
+  const authUrl = 'https://sap-hours-proxy.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=/.auth/me';
   // Open in a new tab — user signs in once, browser session cookie handles all future requests
   await chrome.tabs.create({ url: authUrl });
 }
