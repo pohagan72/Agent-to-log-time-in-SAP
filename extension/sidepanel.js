@@ -505,10 +505,46 @@ async function findSAPTab() {
 
 // --- Easy Auth login (opens proxy login page in a new tab) ---
 
+// --- Proxy token management ---
+// After Easy Auth login, /api/token mints a signed token and posts it back via
+// window.opener.postMessage. We cache it in chrome.storage (8h TTL).
+
+let cachedProxyToken = null;
+let cachedProxyTokenExpiry = 0;
+
+async function getProxyToken() {
+  // Return in-memory cache first
+  if (cachedProxyToken && Date.now() < cachedProxyTokenExpiry - 60000) {
+    return cachedProxyToken;
+  }
+  // Try chrome.storage
+  const stored = await new Promise(resolve =>
+    chrome.storage.local.get('proxyToken', d => resolve(d.proxyToken))
+  );
+  if (stored && stored.token && Date.now() < stored.expiry - 60000) {
+    cachedProxyToken = stored.token;
+    cachedProxyTokenExpiry = stored.expiry;
+    return cachedProxyToken;
+  }
+  return null;
+}
+
+async function saveProxyToken(token, expiry) {
+  cachedProxyToken = token;
+  cachedProxyTokenExpiry = expiry;
+  await new Promise(resolve => chrome.storage.local.set({ proxyToken: { token, expiry } }, resolve));
+}
+
+// Listen for token posted back from /api/token login page
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SAP_AGENT_TOKEN' && event.data.token) {
+    saveProxyToken(event.data.token, event.data.expiry);
+    console.log('[SAP Hours Agent] Proxy token received and cached');
+  }
+});
+
 async function triggerEasyAuthLogin() {
-  const authUrl = 'https://sap-hours-proxy.azurewebsites.net/.auth/login/aad?post_login_redirect_uri=/.auth/me';
-  // Open in a new tab — user signs in once, browser session cookie handles all future requests
-  await chrome.tabs.create({ url: authUrl });
+  await chrome.tabs.create({ url: 'https://sap-hours-proxy.azurewebsites.net/api/token' });
 }
 
 // --- Claude API ---
@@ -546,10 +582,19 @@ async function callClaude(userMessage, sapState) {
   };
 
   try {
+    const token = await getProxyToken();
+    if (!token) {
+      addMessage('system', 'Sign-in required. Opening login page — after signing in, come back and try again.');
+      await triggerEasyAuthLogin();
+      return { error: null };
+    }
+
     const resp = await fetch(CONFIG.proxyEndpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
       body: JSON.stringify({
         messages: conversationHistory,
         context: context,
@@ -557,7 +602,11 @@ async function callClaude(userMessage, sapState) {
     });
 
     if (resp.status === 401) {
-      addMessage('system', 'Sign-in required. Opening login page — after signing in, come back here and try again.');
+      // Token expired — clear cache and re-login
+      cachedProxyToken = null;
+      cachedProxyTokenExpiry = 0;
+      await new Promise(resolve => chrome.storage.local.remove('proxyToken', resolve));
+      addMessage('system', 'Session expired. Opening login page — after signing in, come back and try again.');
       await triggerEasyAuthLogin();
       return { error: null };
     }

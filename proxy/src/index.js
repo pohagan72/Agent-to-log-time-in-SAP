@@ -1,6 +1,7 @@
 const { app } = require('@azure/functions');
 const https = require('https');
 const url = require('url');
+const crypto = require('crypto');
 
 // --- Configuration (from environment or defaults) ---
 
@@ -38,6 +39,34 @@ setInterval(() => {
     if (val.windowStart < cutoff) rateLimitMap.delete(key);
   }
 }, 5 * 60 * 1000);
+
+// --- HMAC session tokens ---
+// After Easy Auth login, /api/token mints a short-lived signed token the extension
+// caches in chrome.storage and sends as Authorization: Bearer. This avoids the
+// cross-origin cookie problem (SameSite=None cookies blocked by Edge from extensions).
+
+const TOKEN_SECRET = process.env.TOKEN_SECRET || 'change-me-in-production';
+const TOKEN_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
+
+function mintToken(email, oid) {
+  const payload = { email, oid, exp: Date.now() + TOKEN_TTL_MS };
+  const data = JSON.stringify(payload);
+  const sig = crypto.createHmac('sha256', TOKEN_SECRET).update(data).digest('hex');
+  return Buffer.from(JSON.stringify({ data, sig })).toString('base64url');
+}
+
+function verifySessionToken(token) {
+  try {
+    const { data, sig } = JSON.parse(Buffer.from(token, 'base64url').toString('utf8'));
+    const expected = crypto.createHmac('sha256', TOKEN_SECRET).update(data).digest('hex');
+    if (!crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'))) return null;
+    const payload = JSON.parse(data);
+    if (Date.now() > payload.exp) return null;
+    return payload;
+  } catch (e) {
+    return null;
+  }
+}
 
 // --- Easy Auth identity extraction ---
 // Azure App Service Easy Auth injects X-MS-CLIENT-PRINCIPAL (base64 JSON) on every
@@ -318,6 +347,54 @@ function sanitizeContext(ctx) {
   };
 }
 
+// --- Token endpoint: called after Easy Auth login to mint a Bearer token ---
+// The browser tab is on sap-hours-proxy.azurewebsites.net so the Easy Auth
+// session cookie is same-origin and readable by the platform.
+
+app.http('token', {
+  methods: ['GET', 'OPTIONS'],
+  authLevel: 'anonymous',
+  handler: async (request, context) => {
+    const origin = request.headers.get('origin') || '';
+    const corsHeaders = getCorsHeaders(origin);
+
+    if (request.method === 'OPTIONS') {
+      return { status: 204, headers: corsHeaders };
+    }
+
+    const identity = getIdentityFromEasyAuth(request);
+    if (!identity || !identity.email) {
+      // Not authenticated — redirect to login, then back here
+      return {
+        status: 302,
+        headers: {
+          ...corsHeaders,
+          'Location': '/.auth/login/aad?post_login_redirect_uri=/api/token',
+        },
+      };
+    }
+
+    const token = mintToken(identity.email, identity.oid);
+    // Return a page that posts the token back to the extension via window.opener
+    const html = `<!DOCTYPE html><html><body><script>
+      const token = ${JSON.stringify(token)};
+      const expiry = ${Date.now() + TOKEN_TTL_MS};
+      if (window.opener) {
+        window.opener.postMessage({ type: 'SAP_AGENT_TOKEN', token, expiry }, '*');
+        window.close();
+      } else {
+        document.body.innerText = 'Signed in. You can close this tab.';
+      }
+    </script></body></html>`;
+
+    return {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'text/html' },
+      body: html,
+    };
+  },
+});
+
 // --- Azure Function Handler ---
 
 app.http('claude', {
@@ -332,16 +409,18 @@ app.http('claude', {
       return { status: 204, headers: corsHeaders };
     }
 
-    // Verify identity via Easy Auth header (injected by Azure App Service)
-    const identity = getIdentityFromEasyAuth(request);
-    if (!identity || !identity.email) {
-      return { status: 401, headers: { ...corsHeaders, 'X-Auth-Required': 'easy-auth' }, jsonBody: { error: 'Authentication required', authUrl: 'https://sap-hours-proxy.azurewebsites.net/.auth/login/aad' } };
+    // Verify Bearer token (minted by /api/token after Easy Auth login)
+    const authHeader = request.headers.get('authorization') || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    const claims = bearerToken ? verifySessionToken(bearerToken) : null;
+    if (!claims) {
+      return { status: 401, headers: corsHeaders, jsonBody: { error: 'Authentication required', authUrl: 'https://sap-hours-proxy.azurewebsites.net/api/token' } };
     }
 
-    const email = identity.email;
+    const email = claims.email;
 
     // Rate limiting
-    const userId = identity.oid || email;
+    const userId = claims.oid || email;
     if (!checkRateLimit(userId)) {
       context.warn(`Rate limit exceeded for ${email}`);
       return { status: 429, headers: corsHeaders, jsonBody: { error: 'Too many requests. Please wait a moment.' } };
