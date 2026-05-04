@@ -10,8 +10,8 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 });
 
-// After Easy Auth login, /api/token redirects to /api/token/done#t=<token>&exp=<expiry>
-// We read token from the fragment in tab.url, store it, and close the tab.
+// After login, /api/token redirects to /api/token/done#t=<token>&exp=<expiry>
+// Read token from fragment, store in chrome.storage, close the tab.
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
   if (!tab.url) return;
