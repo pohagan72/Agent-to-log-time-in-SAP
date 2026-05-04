@@ -1,15 +1,9 @@
 const { app } = require('@azure/functions');
 const https = require('https');
 const url = require('url');
-const jwt = require('jsonwebtoken');
-const jwksClient = require('jwks-rsa');
 
 // --- Configuration (from environment or defaults) ---
 
-const TENANT_ID = process.env.ENTRA_TENANT_ID || '2a9f86a9-29e7-44bd-8863-849373d53db8';
-const CLIENT_ID = process.env.ENTRA_CLIENT_ID || '18e3ec56-ab30-427f-84cf-b3ee61e4887d';
-const ISSUER = `https://login.microsoftonline.com/${TENANT_ID}/v2.0`;
-const JWKS_URI = `https://login.microsoftonline.com/${TENANT_ID}/discovery/v2.0/keys`;
 const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || '@epiqglobal.com';
 
 // CORS: restrict to known origins only
@@ -45,28 +39,33 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// --- JWT Verification ---
+// --- Easy Auth identity extraction ---
+// Azure App Service Easy Auth injects X-MS-CLIENT-PRINCIPAL (base64 JSON) on every
+// authenticated request. We read it instead of validating JWTs ourselves.
 
-const client = jwksClient({ jwksUri: JWKS_URI, cache: true, rateLimit: true });
-
-function getSigningKey(header, callback) {
-  client.getSigningKey(header.kid, (err, key) => {
-    if (err) return callback(err);
-    callback(null, key.getPublicKey());
-  });
-}
-
-function verifyToken(token) {
-  return new Promise((resolve, reject) => {
-    jwt.verify(token, getSigningKey, {
-      audience: CLIENT_ID,
-      issuer: ISSUER,
-      algorithms: ['RS256'],
-    }, (err, decoded) => {
-      if (err) return reject(err);
-      resolve(decoded);
-    });
-  });
+function getIdentityFromEasyAuth(request) {
+  const principal = request.headers.get('x-ms-client-principal');
+  if (!principal) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(principal, 'base64').toString('utf8'));
+    // Extract email from claims
+    const claims = decoded.claims || [];
+    const emailClaim = claims.find(c =>
+      c.typ === 'preferred_username' ||
+      c.typ === 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress' ||
+      c.typ === 'email'
+    );
+    const oidClaim = claims.find(c =>
+      c.typ === 'http://schemas.microsoft.com/identity/claims/objectidentifier' ||
+      c.typ === 'oid'
+    );
+    return {
+      email: (emailClaim?.val || '').toLowerCase(),
+      oid: oidClaim?.val || emailClaim?.val || 'unknown',
+    };
+  } catch (e) {
+    return null;
+  }
 }
 
 // --- CORS Helper ---
@@ -333,30 +332,20 @@ app.http('claude', {
       return { status: 204, headers: corsHeaders };
     }
 
-    // Validate Bearer token
-    const authHeader = request.headers.get('authorization') || '';
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    if (!token) {
-      return { status: 401, headers: corsHeaders, jsonBody: { error: 'Authorization required' } };
-    }
-
-    let claims;
-    try {
-      claims = await verifyToken(token);
-    } catch (e) {
-      context.error('Token validation failed:', e.message);
-      // Don't leak JWT error details to client
-      return { status: 401, headers: corsHeaders, jsonBody: { error: 'Authentication failed' } };
+    // Verify identity via Easy Auth header (injected by Azure App Service)
+    const identity = getIdentityFromEasyAuth(request);
+    if (!identity || !identity.email) {
+      return { status: 401, headers: { ...corsHeaders, 'X-Auth-Required': 'easy-auth' }, jsonBody: { error: 'Authentication required', authUrl: 'https://sap-hours-proxy.azurewebsites.net/.auth/login/aad' } };
     }
 
     // Restrict to allowed domain
-    const email = (claims.preferred_username || claims.email || '').toLowerCase();
+    const email = identity.email;
     if (!email.endsWith(ALLOWED_DOMAIN)) {
       return { status: 403, headers: corsHeaders, jsonBody: { error: 'Access restricted' } };
     }
 
     // Rate limiting
-    const userId = claims.oid || claims.sub || email;
+    const userId = identity.oid || email;
     if (!checkRateLimit(userId)) {
       context.warn(`Rate limit exceeded for ${email}`);
       return { status: 429, headers: corsHeaders, jsonBody: { error: 'Too many requests. Please wait a moment.' } };
