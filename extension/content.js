@@ -389,6 +389,12 @@ window.addEventListener('message', async (event) => {
         setTimeout(() => window.location.reload(), 1000);
         result = { ok: true };
         break;
+      case 'NAVIGATE_TIME_ENTRY':
+        setTimeout(() => {
+          window.location.href = `https://${CONFIG.sapHostname}/sap/bc/ui2/flp#FioriTime-Enter`;
+        }, 300);
+        result = { ok: true };
+        break;
       case 'GET_USER_CONFIG':
         if (!userConfig) await initUserConfig();
         result = userConfig;

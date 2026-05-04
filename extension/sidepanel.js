@@ -427,6 +427,16 @@ async function sendSAPAction(action) {
   return chrome.tabs.sendMessage(tab.id, { type: 'EXECUTE_ACTION', action });
 }
 
+async function navigateToTimeEntry() {
+  if (isEmbedded) {
+    return postMessageToParent('NAVIGATE_TIME_ENTRY', {});
+  }
+  const tab = await findSAPTab();
+  if (!tab) throw new Error('No SAP tab found.');
+  const timeEntryUrl = `https://${CONFIG.sapHostname}/sap/bc/ui2/flp#FioriTime-Enter`;
+  await chrome.tabs.update(tab.id, { url: timeEntryUrl });
+}
+
 async function searchSAPProjects(query) {
   if (isEmbedded) {
     return postMessageToParent('SEARCH_PROJECTS', { query });
@@ -847,6 +857,24 @@ async function processAgentResponse(response) {
 }
 
 async function executeTimeEntries(entries) {
+  const currentState = await getSAPState();
+  if (currentState.page !== 'timeEntry') {
+    addMessage('system', 'Navigating to Time Entry...');
+    try {
+      await navigateToTimeEntry();
+    } catch (err) {
+      addMessage('error', `Could not navigate to Time Entry: ${err.message}`);
+      return;
+    }
+    // Wait for the page to load and the content script to reinitialise
+    await new Promise(resolve => setTimeout(resolve, 4000));
+    const stateAfterNav = await getSAPState();
+    if (stateAfterNav.page !== 'timeEntry') {
+      addMessage('error', 'SAP did not load the Time Entry page. Please navigate there manually and try again.');
+      return;
+    }
+  }
+
   addMessage('system', `Entering ${entries.length} time entries into SAP...`);
 
   const byDate = {};
