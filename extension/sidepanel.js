@@ -387,8 +387,11 @@ async function handleSend() {
     if (response.error) {
       addMessage('error', response.error);
       setStatus('error', 'Error');
-    } else {
+    } else if (response.text) {
       await processAgentResponse(response);
+      setStatus('connected', 'Ready');
+    } else {
+      // null error = auth redirect in progress, nothing to display
       setStatus('connected', 'Ready');
     }
   } catch (err) {
