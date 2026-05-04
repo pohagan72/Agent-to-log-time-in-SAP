@@ -609,7 +609,8 @@ async function callClaude(userMessage, sapState) {
       }),
     });
 
-    console.log('[SAP Hours Agent] Proxy response status:', resp.status);
+    const respText = await resp.text();
+    console.log('[SAP Hours Agent] Proxy response status:', resp.status, 'body:', respText.substring(0, 300));
 
     if (resp.status === 401) {
       cachedProxyToken = null;
@@ -621,11 +622,10 @@ async function callClaude(userMessage, sapState) {
     }
 
     if (!resp.ok) {
-      const errText = await resp.text();
-      return { error: `API error (${resp.status}): ${errText}` };
+      return { error: `API error (${resp.status}): ${respText}` };
     }
 
-    const data = await resp.json();
+    const data = JSON.parse(respText);
     const assistantMessage = data.content[0].text;
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
     return { text: assistantMessage };
