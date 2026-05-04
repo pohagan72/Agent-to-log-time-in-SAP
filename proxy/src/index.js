@@ -375,22 +375,31 @@ app.http('token', {
     }
 
     const token = mintToken(identity.email, identity.oid);
-    // Return a page that posts the token back to the extension via window.opener
-    const html = `<!DOCTYPE html><html><body><script>
-      const token = ${JSON.stringify(token)};
-      const expiry = ${Date.now() + TOKEN_TTL_MS};
-      if (window.opener) {
-        window.opener.postMessage({ type: 'SAP_AGENT_TOKEN', token, expiry }, '*');
-        window.close();
-      } else {
-        document.body.innerText = 'Signed in. You can close this tab.';
-      }
-    </script></body></html>`;
+    const expiry = Date.now() + TOKEN_TTL_MS;
+    // Redirect to callback URL with token in fragment — background script reads
+    // it from tab.url via tabs.onUpdated, then closes the tab.
+    // Fragment (#) is never sent to the server, so token stays client-side.
+    return {
+      status: 302,
+      headers: {
+        ...corsHeaders,
+        'Location': `https://sap-hours-proxy.azurewebsites.net/api/token/done#t=${encodeURIComponent(token)}&exp=${expiry}`,
+      },
+    };
+  },
+});
 
+// Simple landing page after login — background script reads token from tab URL fragment
+app.http('tokenDone', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'token/done',
+  handler: async () => {
     return {
       status: 200,
-      headers: { ...corsHeaders, 'Content-Type': 'text/html' },
-      body: html,
+      headers: { 'Content-Type': 'text/html' },
+      body: `<!DOCTYPE html><html><head><title>SAP Hours Agent</title></head>
+        <body><p>Signed in. This tab will close automatically.</p></body></html>`,
     };
   },
 });

@@ -535,13 +535,6 @@ async function saveProxyToken(token, expiry) {
   await new Promise(resolve => chrome.storage.local.set({ proxyToken: { token, expiry } }, resolve));
 }
 
-// Listen for token posted back from /api/token login page
-window.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'SAP_AGENT_TOKEN' && event.data.token) {
-    saveProxyToken(event.data.token, event.data.expiry);
-    console.log('[SAP Hours Agent] Proxy token received and cached');
-  }
-});
 
 async function triggerEasyAuthLogin() {
   await chrome.tabs.create({ url: 'https://sap-hours-proxy.azurewebsites.net/api/token' });
