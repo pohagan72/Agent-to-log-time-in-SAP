@@ -102,7 +102,7 @@ function getIdentityFromEasyAuth(request) {
 function getCorsHeaders(requestOrigin) {
   const headers = {
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Agent-Token',
     'Access-Control-Max-Age': '86400',
   };
   // Only reflect origin if it's in the allow list
@@ -418,9 +418,9 @@ app.http('claude', {
       return { status: 204, headers: corsHeaders };
     }
 
-    // Verify Bearer token (minted by /api/token after Easy Auth login)
-    const authHeader = request.headers.get('authorization') || '';
-    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    // Verify session token (minted by /api/token after Easy Auth login)
+    // Use X-Agent-Token header — Authorization: Bearer triggers Easy Auth interception
+    const bearerToken = request.headers.get('x-agent-token') || '';
     const claims = bearerToken ? verifySessionToken(bearerToken) : null;
     if (!claims) {
       return { status: 401, headers: corsHeaders, jsonBody: { error: 'Authentication required', authUrl: 'https://sap-hours-proxy.azurewebsites.net/api/token' } };

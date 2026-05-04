@@ -589,7 +589,7 @@ async function callClaude(userMessage, sapState) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
+        'X-Agent-Token': token,
       },
       body: JSON.stringify({
         messages: conversationHistory,
