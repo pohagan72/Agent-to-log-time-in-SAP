@@ -578,11 +578,20 @@ async function callClaude(userMessage, sapState) {
   };
 
   try {
-    const token = await getProxyToken();
+    let token = await getProxyToken();
     if (!token) {
-      addMessage('system', 'Sign-in required. Opening login page — after signing in, come back and try again.');
+      addMessage('system', 'Signing in...');
       await triggerEasyAuthLogin();
-      return { error: null };
+      // Wait for background script to store the token (login tab opens, auth happens, tab closes)
+      for (let i = 0; i < 30; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        token = await getProxyToken();
+        if (token) break;
+      }
+      if (!token) {
+        addMessage('error', 'Sign-in timed out. Please try again.');
+        return { error: null };
+      }
     }
 
     const resp = await fetch(CONFIG.proxyEndpoint, {
