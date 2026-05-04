@@ -338,11 +338,7 @@ app.http('claude', {
       return { status: 401, headers: { ...corsHeaders, 'X-Auth-Required': 'easy-auth' }, jsonBody: { error: 'Authentication required', authUrl: 'https://sap-hours-proxy.azurewebsites.net/.auth/login/aad' } };
     }
 
-    // Restrict to allowed domain
     const email = identity.email;
-    if (!email.endsWith(ALLOWED_DOMAIN)) {
-      return { status: 403, headers: corsHeaders, jsonBody: { error: 'Access restricted' } };
-    }
 
     // Rate limiting
     const userId = identity.oid || email;
