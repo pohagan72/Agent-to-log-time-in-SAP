@@ -136,12 +136,12 @@ function saveState() {
 async function restoreState() {
   return new Promise(resolve => {
     chrome.storage.local.get('agentState', (data) => {
-      if (!data.agentState) { resolve(false); return; }
+      if (!data.agentState) { resolve(null); return; }
       const state = data.agentState;
       // Only restore if saved within last 5 minutes
       if (Date.now() - state.savedAt > 5 * 60 * 1000) {
         chrome.storage.local.remove('agentState');
-        resolve(false);
+        resolve(null);
         return;
       }
       // Restore chat UI
@@ -161,7 +161,7 @@ async function restoreState() {
       // Clear saved state
       chrome.storage.local.remove('agentState');
       console.log('[SAP Hours Agent] State restored:', state.chatMessages.length, 'messages');
-      resolve(true);
+      resolve(state.pendingEntries || true);
     });
   });
 }
@@ -187,7 +187,11 @@ async function init() {
   }
 
   const restored = await restoreState();
-  if (restored) {
+  if (restored && Array.isArray(restored)) {
+    // Navigated here to submit pending entries — proceed automatically
+    addMessage('system', 'Conversation restored. Submitting entries...');
+    await executeTimeEntries(restored);
+  } else if (restored) {
     addMessage('system', 'Page refreshed — entries submitted. Conversation restored.');
   } else {
     await showWelcome();
@@ -860,19 +864,20 @@ async function executeTimeEntries(entries) {
   const currentState = await getSAPState();
   if (currentState.page !== 'timeEntry') {
     addMessage('system', 'Navigating to Time Entry...');
+    // Save chat + conversation + pending entries before navigation destroys the iframe
+    const chatMessages = [];
+    chat.querySelectorAll('.message').forEach(div => {
+      const type = ['agent', 'user', 'system', 'error'].find(t => div.classList.contains(t)) || 'agent';
+      chatMessages.push({ type, text: type === 'agent' ? div.innerHTML : div.textContent });
+    });
+    const state = { chatMessages, conversationHistory, savedAt: Date.now(), pendingEntries: entries };
+    await new Promise(resolve => chrome.storage.local.set({ agentState: state }, resolve));
     try {
       await navigateToTimeEntry();
     } catch (err) {
       addMessage('error', `Could not navigate to Time Entry: ${err.message}`);
-      return;
     }
-    // Wait for the page to load and the content script to reinitialise
-    await new Promise(resolve => setTimeout(resolve, 4000));
-    const stateAfterNav = await getSAPState();
-    if (stateAfterNav.page !== 'timeEntry') {
-      addMessage('error', 'SAP did not load the Time Entry page. Please navigate there manually and try again.');
-      return;
-    }
+    return;
   }
 
   addMessage('system', `Entering ${entries.length} time entries into SAP...`);
