@@ -579,13 +579,15 @@ async function callClaude(userMessage, sapState) {
 
   try {
     let token = await getProxyToken();
+    console.log('[SAP Hours Agent] getProxyToken result:', token ? `token length=${token.length}` : 'null');
+
     if (!token) {
       addMessage('system', 'Signing in...');
       await triggerEasyAuthLogin();
-      // Wait for background script to store the token (login tab opens, auth happens, tab closes)
       for (let i = 0; i < 30; i++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         token = await getProxyToken();
+        console.log(`[SAP Hours Agent] Poll ${i+1}/30: token=${token ? 'found' : 'null'}`);
         if (token) break;
       }
       if (!token) {
@@ -594,6 +596,7 @@ async function callClaude(userMessage, sapState) {
       }
     }
 
+    console.log('[SAP Hours Agent] Sending request with X-Agent-Token, token length:', token.length);
     const resp = await fetch(CONFIG.proxyEndpoint, {
       method: 'POST',
       headers: {
@@ -606,8 +609,9 @@ async function callClaude(userMessage, sapState) {
       }),
     });
 
+    console.log('[SAP Hours Agent] Proxy response status:', resp.status);
+
     if (resp.status === 401) {
-      // Token expired — clear cache and re-login
       cachedProxyToken = null;
       cachedProxyTokenExpiry = 0;
       await new Promise(resolve => chrome.storage.local.remove('proxyToken', resolve));
