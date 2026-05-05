@@ -5,3 +5,5 @@ extension/config.js
 extension/manifest.json
 proxy/deploy.zip
 sap-agent-browser-extension.zip
+.authsettings_backup.json
+.auth_put_body.json

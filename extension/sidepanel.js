@@ -579,15 +579,12 @@ async function callClaude(userMessage, sapState) {
 
   try {
     let token = await getProxyToken();
-    console.log('[SAP Hours Agent] getProxyToken result:', token ? `token length=${token.length}` : 'null');
-
     if (!token) {
       addMessage('system', 'Signing in...');
       await triggerEasyAuthLogin();
       for (let i = 0; i < 30; i++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         token = await getProxyToken();
-        console.log(`[SAP Hours Agent] Poll ${i+1}/30: token=${token ? 'found' : 'null'}`);
         if (token) break;
       }
       if (!token) {
@@ -596,7 +593,6 @@ async function callClaude(userMessage, sapState) {
       }
     }
 
-    console.log('[SAP Hours Agent] Sending request with X-Agent-Token, token length:', token.length);
     const resp = await fetch(CONFIG.proxyEndpoint, {
       method: 'POST',
       headers: {
@@ -609,9 +605,6 @@ async function callClaude(userMessage, sapState) {
       }),
     });
 
-    const respText = await resp.text();
-    console.log('[SAP Hours Agent] Proxy response status:', resp.status, 'body:', respText.substring(0, 300));
-
     if (resp.status === 401) {
       cachedProxyToken = null;
       cachedProxyTokenExpiry = 0;
@@ -622,10 +615,11 @@ async function callClaude(userMessage, sapState) {
     }
 
     if (!resp.ok) {
-      return { error: `API error (${resp.status}): ${respText}` };
+      const errText = await resp.text();
+      return { error: `API error (${resp.status}): ${errText}` };
     }
 
-    const data = JSON.parse(respText);
+    const data = await resp.json();
     const assistantMessage = data.content[0].text;
     conversationHistory.push({ role: 'assistant', content: assistantMessage });
     return { text: assistantMessage };
